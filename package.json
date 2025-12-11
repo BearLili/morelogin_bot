@@ -1,0 +1,71 @@
+{
+  "name": "morelogin-bot",
+  "version": "1.0.0",
+  "description": "MoreLogin脚本控制器 - 统一调度和管理自动化脚本执行",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:win:portable": "electron-builder --win portable",
+    "build:win:x64": "electron-builder --win --x64",
+    "build:win:ia32": "electron-builder --win --ia32",
+    "build:win:portable:x64": "electron-builder --win portable --x64",
+    "build:win:portable:ia32": "electron-builder --win portable --ia32"
+  },
+  "keywords": [
+    "morelogin",
+    "automation",
+    "bot"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^27.0.0",
+    "electron-builder": "^24.6.4"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "puppeteer-core": "^22.15.0",
+    "ws": "^8.14.2"
+  },
+  "build": {
+    "appId": "com.morelogin.bot",
+    "productName": "MoreLogin Bot",
+    "directories": {
+      "output": "dist"
+    },
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "allowElevation": true,
+      "runAfterFinish": false,
+      "deleteAppDataOnUninstall": false,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "MoreLogin Bot"
+    },
+    "files": [
+      "**/*",
+      "!node_modules/**/*",
+      "!dist/**/*",
+      "!build/**/*",
+      "!**/*.md",
+      "!**/.git/**/*",
+      "!BUILD.md",
+      "node_modules/axios/**/*",
+      "node_modules/ws/**/*",
+      "node_modules/puppeteer-core/**/*",
+      "scripts/**/*"
+    ]
+  }
+}
+
