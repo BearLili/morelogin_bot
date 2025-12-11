@@ -54,18 +54,19 @@
       "shortcutName": "MoreLogin Bot"
     },
     "files": [
-      "**/*",
-      "!node_modules/**/*",
-      "!dist/**/*",
-      "!build/**/*",
       "!**/*.md",
       "!**/.git/**/*",
       "!BUILD.md",
-      "node_modules/axios/**/*",
-      "node_modules/ws/**/*",
-      "node_modules/puppeteer-core/**/*",
-      "scripts/**/*"
-    ]
+      "!README.md",
+      "!DEBUG.md",
+      "!dist/**/*",
+      "!build/**/*",
+      "!**/test/**/*",
+      "!**/tests/**/*",
+      "!**/*.test.js",
+      "!**/*.spec.js"
+    ],
+    "asar": true
   }
 }
 

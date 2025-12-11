@@ -31,14 +31,11 @@ function createWindow() {
     });
 
     // 确定index.html的路径
-    let indexPath;
-    if (app.isPackaged) {
-      indexPath = path.join(process.resourcesPath, 'app', 'index.html');
-    } else {
-      indexPath = path.join(__dirname, 'index.html');
-    }
+    // 打包后文件在 app.asar 中，__dirname 会指向 app.asar 内的路径
+    const indexPath = path.join(__dirname, 'index.html');
 
     logError('Starting application', null);
+    logError(`__dirname: ${__dirname}`, null);
     logError(`Index path: ${indexPath}`, null);
     logError(`File exists: ${fs.existsSync(indexPath)}`, null);
 
@@ -141,16 +138,9 @@ ipcMain.handle('save-config', async (event, config) => {
 });
 
 ipcMain.handle('list-scripts', async () => {
-  // 在打包后的应用中，scripts目录在resources/app/scripts
-  // 在开发环境中，scripts目录在项目根目录
-  let scriptsPath;
-  if (app.isPackaged) {
-    // 打包后：resources/app/scripts
-    scriptsPath = path.join(process.resourcesPath, 'app', 'scripts');
-  } else {
-    // 开发环境：项目根目录/scripts
-    scriptsPath = path.join(__dirname, 'scripts');
-  }
+  // 打包后文件在 app.asar 中，__dirname 会指向 app.asar 内的路径
+  // 开发环境中，__dirname 指向项目根目录
+  const scriptsPath = path.join(__dirname, 'scripts');
   
   try {
     if (!fs.existsSync(scriptsPath)) {
@@ -163,6 +153,7 @@ ipcMain.handle('list-scripts', async () => {
     }));
   } catch (error) {
     console.error('Error listing scripts:', error);
+    logError('Error listing scripts', error);
     return [];
   }
 });
