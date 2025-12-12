@@ -136,6 +136,7 @@ class ScriptController extends EventEmitter {
     const envId = environment.Id || environment.id || environment.environment_id;
     const envName = environment.envName || environment.name || '';
     let isEnvironmentStarted = false;
+    let shouldCloseEnvironment = false; // 标记是否需要关闭环境
 
     try {
       this.emit('log', `[${index}/${total}] 开始执行环境: ${envName || envId} (ID: ${envId})`, 'info');
@@ -143,8 +144,17 @@ class ScriptController extends EventEmitter {
 
       // 启动环境窗口（这里会占用一个并发槽位）
       this.emit('log', `[${index}/${total}] 正在启动环境窗口...`, 'info');
-      const startResult = await this.client.startEnvironment(envId);
-      isEnvironmentStarted = true;
+      let startResult;
+      try {
+        startResult = await this.client.startEnvironment(envId);
+        isEnvironmentStarted = true;
+        shouldCloseEnvironment = true; // 启动成功，需要关闭
+      } catch (startError) {
+        // 启动失败，标记需要关闭（可能窗口已经打开了）
+        shouldCloseEnvironment = true;
+        isEnvironmentStarted = false;
+        throw startError; // 重新抛出错误，让外层catch处理
+      }
       
       // 从启动结果获取debugPort和webdriver
       const debugPort = startResult.debugPort;
@@ -179,27 +189,72 @@ class ScriptController extends EventEmitter {
       this.stats.completed++;
       this.updateStats();
       this.emit('log', `[${index}/${total}] 环境 ${envName || envId} 执行完成`, 'success');
-
     } catch (error) {
       this.stats.failed++;
       this.updateStats();
       this.emit('log', `[${index}/${total}] 环境 ${envName || envId} 执行失败: ${error.message}`, 'error');
     } finally {
-      // 无论成功失败，都要关闭环境窗口（释放并发槽位）
-      if (isEnvironmentStarted) {
-        const maxCloseRetry = 3;
-        let closed = false;
-        for (let i = 1; i <= maxCloseRetry && !closed; i++) {
-          try {
-            this.emit('log', `[${index}/${total}] 正在关闭环境窗口... (第${i}/${maxCloseRetry}次)`, 'info');
-            await this.client.closeEnvironment(envId);
-            closed = true;
-            this.emit('log', `[${index}/${total}] 环境窗口已关闭 (释放槽位，当前运行: ${this.runningTasks.size - 1}/${this.maxConcurrent})`, 'info');
-          } catch (closeError) {
-            if (i === maxCloseRetry) {
-              this.emit('log', `[${index}/${total}] 关闭环境窗口失败（已重试${maxCloseRetry}次）: ${closeError.message}。请在 MoreLogin 客户端手动检查该环境是否仍在运行。`, 'warning');
-            } else {
-              await new Promise(res => setTimeout(res, 1500));
+      // 无论成功失败，如果启动过环境或启动失败，都要尝试关闭环境窗口（释放并发槽位）
+      if (shouldCloseEnvironment || isEnvironmentStarted) {
+        // 先检查环境状态，如果已经关闭就不需要再关闭了
+        let needClose = true;
+        try {
+          this.emit('log', `[${index}/${total}] 检查环境状态...`, 'info');
+          const status = await this.client.getEnvironmentStatus(envId);
+          // 检查 status 或 localStatus 是否为 stopped
+          if (status && (status.status === 'stopped' || status.localStatus === 'stopped')) {
+            this.emit('log', `[${index}/${total}] 环境窗口已关闭（状态检查: ${status.status || status.localStatus}）`, 'info');
+            needClose = false;
+          } else if (status) {
+            this.emit('log', `[${index}/${total}] 环境状态: ${status.status || 'unknown'}`, 'info');
+          }
+        } catch (statusError) {
+          // 状态检查失败，继续尝试关闭
+          this.emit('log', `[${index}/${total}] 状态检查失败: ${statusError.message}，继续尝试关闭...`, 'info');
+        }
+
+        if (needClose) {
+          const maxCloseRetry = 3;
+          let closed = false;
+          for (let i = 1; i <= maxCloseRetry && !closed; i++) {
+            try {
+              if (i === 1) {
+                this.emit('log', `[${index}/${total}] 正在关闭环境窗口...`, 'info');
+              } else {
+                this.emit('log', `[${index}/${total}] 重试关闭环境窗口... (第${i}/${maxCloseRetry}次)`, 'info');
+              }
+              
+              const closeResult = await this.client.closeEnvironment(envId);
+              
+              // 检查是否已经关闭
+              if (closeResult && closeResult.alreadyClosed) {
+                this.emit('log', `[${index}/${total}] 环境窗口已关闭（可能之前已关闭）`, 'info');
+              } else {
+                this.emit('log', `[${index}/${total}] 环境窗口已关闭 (释放槽位，当前运行: ${this.runningTasks.size - 1}/${this.maxConcurrent})`, 'info');
+              }
+              closed = true;
+            } catch (closeError) {
+              if (i === maxCloseRetry) {
+                // 最后一次重试失败，再次检查状态确认是否真的关闭了
+                try {
+                  this.emit('log', `[${index}/${total}] 关闭API失败，再次检查环境状态...`, 'info');
+                  const finalStatus = await this.client.getEnvironmentStatus(envId);
+                  if (finalStatus && (finalStatus.status === 'stopped' || finalStatus.localStatus === 'stopped')) {
+                    this.emit('log', `[${index}/${total}] 环境窗口已关闭（状态确认: ${finalStatus.status || finalStatus.localStatus}）`, 'info');
+                    closed = true;
+                  } else {
+                    this.emit('log', `[${index}/${total}] 关闭环境窗口失败（已重试${maxCloseRetry}次）: ${closeError.message}`, 'warning');
+                    this.emit('log', `[${index}/${total}] 提示: 请在 MoreLogin 客户端手动检查环境 ${envId} 是否仍在运行`, 'warning');
+                  }
+                } catch (finalCheckError) {
+                  // 最终检查也失败，记录警告
+                  this.emit('log', `[${index}/${total}] 关闭环境窗口失败（已重试${maxCloseRetry}次）: ${closeError.message}`, 'warning');
+                  this.emit('log', `[${index}/${total}] 提示: 环境可能已关闭，但无法确认。请在 MoreLogin 客户端手动检查环境 ${envId}`, 'warning');
+                }
+              } else {
+                // 等待后重试
+                await new Promise(res => setTimeout(res, 1500));
+              }
             }
           }
         }

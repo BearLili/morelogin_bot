@@ -161,13 +161,35 @@ class MoreLoginClient {
       const result = this.checkResponse(response);
       return result.data;
     } catch (error) {
-      let errorMsg = `关闭环境失败: ${error.message}`;
+      // 检查是否是"环境不存在"或"已经关闭"的情况
       if (error.response) {
-        if (error.response.data && error.response.data.msg) {
-          errorMsg = `关闭环境失败: ${error.response.data.msg}`;
+        const status = error.response.status;
+        const data = error.response.data;
+        
+        // 404 或特定的错误码可能表示环境已经不存在或已关闭
+        if (status === 404) {
+          // 环境可能已经关闭，视为成功
+          return { alreadyClosed: true };
         }
+        
+        // 检查错误消息中是否包含"不存在"、"已关闭"等关键词
+        const errorMsg = data?.msg || data?.message || error.message || '';
+        const lowerMsg = errorMsg.toLowerCase();
+        if (lowerMsg.includes('不存在') || 
+            lowerMsg.includes('已关闭') || 
+            lowerMsg.includes('not found') ||
+            lowerMsg.includes('already closed') ||
+            lowerMsg.includes('not running')) {
+          // 环境已经关闭，视为成功
+          return { alreadyClosed: true };
+        }
+        
+        // 其他错误才抛出
+        throw new Error(data?.msg || error.message || '关闭失败');
       }
-      throw new Error(errorMsg);
+      
+      // 网络错误或其他错误
+      throw new Error(error.message || '关闭失败');
     }
   }
 
