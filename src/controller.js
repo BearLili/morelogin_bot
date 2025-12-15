@@ -112,18 +112,25 @@ class ScriptController extends EventEmitter {
     tryPaths.push(resolved);
 
     // 如果在 asar 内，尝试构造 app.asar.unpacked 路径
-    const asarToken = 'app.asar';
-    const idx = resolved.indexOf(asarToken);
+    const asarToken = path.join('app.asar');
+    const normalized = resolved.replace(/\\/g, '/'); // 统一使用 / 进行字符串操作
+    const idx = normalized.indexOf(asarToken.replace(/\\/g, '/'));
     if (idx >= 0) {
-      const prefix = resolved.slice(0, idx);
-      const suffix = resolved.slice(idx + asarToken.length); // 带前导分隔符
-      const unpacked = path.join(prefix, 'app.asar.unpacked', suffix.replace(/^[/\\]/, ''));
+      const prefix = resolved.substring(0, idx);
+      const suffix = resolved.substring(idx + asarToken.length);
+      // 移除前导分隔符，然后使用 path.join 正确拼接
+      const cleanSuffix = suffix.replace(/^[/\\]+/, '');
+      const unpacked = path.join(prefix, 'app.asar.unpacked', cleanSuffix);
       tryPaths.push(unpacked);
     }
 
     let lastErr;
     for (const p of tryPaths) {
       try {
+        // 确保路径存在
+        if (!fs.existsSync(p)) {
+          continue;
+        }
         delete require.cache[require.resolve(p)];
         const mod = require(p);
         if (typeof mod !== 'function' && typeof mod.execute !== 'function') {
@@ -132,6 +139,10 @@ class ScriptController extends EventEmitter {
         return mod;
       } catch (err) {
         lastErr = err;
+        // 记录尝试的路径以便调试
+        if (err.code === 'MODULE_NOT_FOUND') {
+          lastErr.message = `${err.message}\n尝试路径: ${p}`;
+        }
       }
     }
     throw new Error(`加载脚本失败: ${lastErr?.message || 'unknown error'}`);
