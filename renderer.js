@@ -3,10 +3,11 @@ const ScriptController = require('./src/controller');
 const MoreLoginClient = require('./src/morelogin-client');
 
 let controller = null;
-let selectedScript = null;
+let selectedScripts = new Map(); // key: script.path, value: script object
 let isRunning = false;
 let allEnvironments = [];
 let selectedEnvironmentIds = new Set();
+let executionMode = 'perEnv'; // perEnv: 单窗口执行所有脚本；perScript: 所有窗口先跑脚本1，再脚本2
 
 // 初始化
 async function init() {
@@ -23,7 +24,7 @@ async function loadConfig() {
   document.getElementById('maxConcurrent').value = config.maxConcurrent || 3;
 }
 
-// 保存配置
+// 保存配置（已绑定保存按钮）
 async function saveConfig() {
   const config = {
     port: parseInt(document.getElementById('port').value),
@@ -40,6 +41,44 @@ async function saveConfig() {
   }
 }
 
+// 绑定保存按钮事件（若有保存按钮）
+window.addEventListener('DOMContentLoaded', () => {
+  const saveBtn = document.getElementById('saveBtn');
+  if (saveBtn) {
+    saveBtn.onclick = () => {
+      saveConfig().catch(err => addLog('保存配置失败: ' + err.message, 'error'));
+    };
+  }
+
+  // 创建/绑定执行模式下拉
+  let modeSelect = document.getElementById('executionMode');
+  if (!modeSelect) {
+    const startBtn = document.getElementById('startBtn');
+    const container = document.createElement('div');
+    container.style.display = 'flex';
+    container.style.alignItems = 'center';
+    container.style.gap = '8px';
+    container.style.margin = '8px 0';
+    container.innerHTML = `
+      <label style="font-weight:600; font-size:13px;"></label>
+      <select id="executionMode" style="padding:6px 8px; border:1px solid #ccc; border-radius:4px; font-size:13px;">
+        <option value="perEnv">单窗口依次执行选中脚本</option>
+        <option value="perScript">按脚本轮次执行所有窗口</option>
+      </select>
+    `;
+    if (startBtn && startBtn.parentNode) {
+      startBtn.parentNode.insertBefore(container, startBtn);
+    } else {
+      document.body.prepend(container);
+    }
+    modeSelect = container.querySelector('#executionMode');
+  }
+  if (modeSelect) {
+    modeSelect.value = executionMode;
+    modeSelect.onchange = (e) => setExecutionMode(e.target.value);
+  }
+});
+
 // 加载脚本列表
 async function loadScripts() {
   const scripts = await ipcRenderer.invoke('list-scripts');
@@ -54,27 +93,36 @@ async function loadScripts() {
   scripts.forEach(script => {
     const li = document.createElement('li');
     li.className = 'script-item';
-    li.textContent = script.name;
-    li.onclick = (e) => selectScript(script, e.target);
+    li.innerHTML = `
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer; padding:6px 8px;">
+        <input type="checkbox" style="width:16px;height:16px;" onchange="toggleScript('${script.path}', '${script.name.replace(/'/g, "\\'")}', '${(script.displayName || script.name).replace(/'/g, "\\'")}')">
+        <div style="display:flex;flex-direction:column;gap:2px;">
+          <span style="font-weight:600;">${script.displayName || script.name}</span>
+          <span style="font-size:12px;color:#666;">${script.name}</span>
+        </div>
+      </label>
+    `;
     scriptList.appendChild(li);
   });
   
   addLog(`已加载 ${scripts.length} 个脚本`, 'info');
 }
 
-// 选择脚本
-function selectScript(script, element) {
-  selectedScript = script;
-  
-  // 更新UI
-  document.querySelectorAll('.script-item').forEach(item => {
-    item.classList.remove('selected');
-  });
-  if (element) {
-    element.classList.add('selected');
+// 切换脚本选择
+function toggleScript(path, name, displayName) {
+  if (selectedScripts.has(path)) {
+    selectedScripts.delete(path);
+  } else {
+    selectedScripts.set(path, { path, name, displayName });
   }
-  
-  addLog(`已选择脚本: ${script.name}`, 'info');
+  const count = selectedScripts.size;
+  addLog(`已选择脚本数: ${count}`, 'info');
+}
+
+// 切换执行模式
+function setExecutionMode(mode) {
+  executionMode = mode;
+  addLog(`执行模式: ${mode === 'perEnv' ? '单窗口顺序执行所有脚本' : '按脚本轮次执行所有窗口'}`, 'info');
 }
 
 // 加载环境列表
@@ -224,9 +272,14 @@ function updateSelectedCount() {
 
 // 开始执行
 async function startExecution() {
-  if (!selectedScript) {
-    addLog('请先选择一个脚本', 'warning');
+  if (selectedScripts.size === 0) {
+    addLog('请至少选择一个脚本', 'warning');
     return;
+  }
+
+  const modeSelect = document.getElementById('executionMode');
+  if (modeSelect) {
+    executionMode = modeSelect.value || executionMode;
   }
 
   const config = {
@@ -325,8 +378,8 @@ async function startExecution() {
       document.getElementById('failedCount').textContent = status.failed;
     });
 
-    // 执行脚本（传入选中的环境列表）
-    await controller.executeScript(selectedScript.path, environments);
+    // 执行脚本（传入选中的环境列表及脚本列表+模式）
+    await controller.executeScripts(Array.from(selectedScripts.values()), environments, executionMode);
     
     addLog('所有任务执行完成', 'success');
   } catch (error) {

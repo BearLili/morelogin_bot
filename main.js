@@ -141,6 +141,17 @@ ipcMain.handle('list-scripts', async () => {
   // 打包后文件在 app.asar 中，__dirname 会指向 app.asar 内的路径
   // 开发环境中，__dirname 指向项目根目录
   const scriptsPath = path.join(__dirname, 'scripts');
+  const aliasPath = path.join(scriptsPath, 'script-alias.json');
+  let aliasMap = {};
+
+  try {
+    if (fs.existsSync(aliasPath)) {
+      const raw = fs.readFileSync(aliasPath, 'utf8');
+      aliasMap = JSON.parse(raw);
+    }
+  } catch (error) {
+    logError('Error reading script-alias.json', error);
+  }
   
   try {
     if (!fs.existsSync(scriptsPath)) {
@@ -149,6 +160,7 @@ ipcMain.handle('list-scripts', async () => {
     const files = fs.readdirSync(scriptsPath);
     return files.filter(f => f.endsWith('.js')).map(f => ({
       name: f.replace('.js', ''),
+      displayName: aliasMap[f] || aliasMap[f.replace('.js', '')] || f.replace('.js', ''),
       path: path.join(scriptsPath, f)
     }));
   } catch (error) {

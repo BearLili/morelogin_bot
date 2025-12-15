@@ -19,7 +19,7 @@ module.exports = async function execute(context) {
 
   // 可调参数
   const targetUrl = 'https://discord.com/channels/@me';
-  const maxLoops = 5; // 主循环次数
+  const maxLoops = 10; // 主循环次数
   const minScrollDelay = 2500;
   const maxScrollDelay = 8000;
   const minReadTime = 4000;
@@ -198,7 +198,13 @@ module.exports = async function execute(context) {
       if (Math.random() < 0.15) {
         const deepRead = Math.floor(Math.random() * (maxDeepReadTime - minDeepReadTime + 1)) + minDeepReadTime;
         log(`深度阅读... (${Math.floor(deepRead / 1000)}秒)`, 'info');
-        await delay(deepRead);
+        // 深度阅读时也滚动几次内容区
+        const deepScrolls = Math.max(2, Math.floor(deepRead / 5000)); // 大约每5秒滚一次
+        for (let j = 0; j < deepScrolls; j++) {
+          await smoothScrollInElement(page, mainSelector);
+          const segment = deepRead / deepScrolls;
+          await delay(segment);
+        }
       }
 
       await randomDelay(minScrollDelay, maxScrollDelay);

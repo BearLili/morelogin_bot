@@ -19,16 +19,35 @@ class ScriptController extends EventEmitter {
   }
 
   /**
-   * 执行脚本
-   * @param {string} scriptPath - 脚本文件路径
-   * @param {Array} environments - 环境列表（可选，如果不提供则自动获取）
+   * 执行脚本（兼容旧接口）
    */
   async executeScript(scriptPath, environments = null) {
+    return this.executeScripts([{ path: scriptPath, name: path.basename(scriptPath) }], environments, 'perEnv');
+  }
+
+  /**
+   * 执行多个脚本
+   * @param {Array} scripts - [{path,name,displayName}]
+   * @param {Array} environments - 环境列表
+   * @param {string} mode - perEnv | perScript
+   */
+  async executeScripts(scripts, environments = null, mode = 'perEnv') {
     this.isStopped = false;
-    
-    // 加载脚本模块
-    const scriptModule = this.loadScript(scriptPath);
-    
+    this.runSummary = [];
+    this.mode = mode;
+    this.stats = { running: 0, completed: 0, failed: 0 };
+
+    if (!Array.isArray(scripts) || scripts.length === 0) {
+      throw new Error('未选择脚本');
+    }
+
+    // 标准化脚本信息
+    this.scripts = scripts.map((s) => ({
+      path: s.path,
+      name: s.name || s.path,
+      displayName: s.displayName || s.name || path.basename(s.path)
+    }));
+
     // 获取环境列表
     if (!environments) {
       this.emit('log', '正在获取环境列表...', 'info');
@@ -45,21 +64,43 @@ class ScriptController extends EventEmitter {
       throw new Error('没有可用的环境');
     }
 
-    this.emit('log', `开始执行 ${environments.length} 个环境...`, 'info');
+    this.emit('log', `开始执行 ${environments.length} 个环境，${this.scripts.length} 个脚本，模式: ${mode === 'perEnv' ? '单窗口顺序执行脚本' : '按脚本轮次执行'}`, 'info');
 
     // 创建任务队列
-    this.taskQueue = environments.map((env, index) => ({
-      id: env.Id || env.id || env.environment_id || index,
-      environment: env,
-      index: index + 1,
-      total: environments.length
-    }));
+    this.taskQueue = [];
+    if (mode === 'perScript') {
+      let idx = 0;
+      for (const script of this.scripts) {
+        environments.forEach((env, envIdx) => {
+          this.taskQueue.push({
+            id: `${script.path}-${env.Id || env.id || envIdx}-${idx++}`,
+            environment: env,
+            scripts: [script],
+            index: envIdx + 1,
+            total: environments.length,
+            scriptIndex: this.scripts.indexOf(script) + 1,
+            scriptTotal: this.scripts.length
+          });
+        });
+      }
+    } else {
+      this.taskQueue = environments.map((env, index) => ({
+        id: env.Id || env.id || env.environment_id || index,
+        environment: env,
+        scripts: this.scripts,
+        index: index + 1,
+        total: environments.length,
+        scriptIndex: 1,
+        scriptTotal: this.scripts.length
+      }));
+    }
 
     // 开始执行任务
-    await this.processQueue(scriptModule);
+    await this.processQueue();
 
     // 汇总日志
     this.emit('log', `执行完成：成功 ${this.stats.completed} 个，失败 ${this.stats.failed} 个`, this.stats.failed > 0 ? 'warning' : 'success');
+    await this.writeRunSummary();
   }
 
   /**
@@ -84,7 +125,7 @@ class ScriptController extends EventEmitter {
   /**
    * 处理任务队列
    */
-  async processQueue(scriptModule) {
+  async processQueue() {
     const promises = [];
 
     while (this.taskQueue.length > 0 || this.runningTasks.size > 0) {
@@ -96,7 +137,7 @@ class ScriptController extends EventEmitter {
       // 启动新任务直到达到最大并发数
       while (this.runningTasks.size < this.maxConcurrent && this.taskQueue.length > 0) {
         const task = this.taskQueue.shift();
-        this.startTask(task, scriptModule);
+        this.startTask(task);
       }
 
       // 等待至少一个任务完成
@@ -120,14 +161,14 @@ class ScriptController extends EventEmitter {
   /**
    * 启动单个任务
    */
-  async startTask(task, scriptModule) {
+  async startTask(task) {
     this.stats.running++;
     this.updateStats();
 
     // 保存任务信息到 taskMap，以便停止时能查找
     this.taskMap.set(task.id, task);
 
-    const taskPromise = this.runTask(task, scriptModule)
+    const taskPromise = this.runTask(task)
       .finally(() => {
         this.runningTasks.delete(task.id);
         this.taskMap.delete(task.id); // 清理任务信息
@@ -142,7 +183,7 @@ class ScriptController extends EventEmitter {
    * 运行任务
    * 注意：启动环境后才占用并发槽位，关闭环境后才释放槽位
    */
-  async runTask(task, scriptModule) {
+  async runTask(task) {
     const { environment, index, total } = task;
     const envId = environment.Id || environment.id || environment.environment_id;
     const envName = environment.envName || environment.name || '';
@@ -192,26 +233,62 @@ class ScriptController extends EventEmitter {
         return;
       }
 
-      // 执行脚本
-      const executeFn = typeof scriptModule === 'function' 
-        ? scriptModule 
-        : scriptModule.execute;
-
-      await executeFn({
-        environmentId: envId,
-        environment: environment,
-        wsUrl: wsUrl,
-        debugPort: debugPort,
-        webdriver: webdriver,
-        client: this.client,
-        log: (message, type = 'info') => {
-          this.emit('log', `[${index}/${total}] ${message}`, type);
+      // 依次执行该任务的脚本列表
+      for (let si = 0; si < task.scripts.length; si++) {
+        const scriptMeta = task.scripts[si];
+        if (this.isStopped) {
+          this.emit('log', `[${index}/${total}] 任务已停止，跳过脚本 ${scriptMeta.displayName}`, 'warning');
+          break;
         }
-      });
 
-      this.stats.completed++;
-      this.updateStats();
-      this.emit('log', `[${index}/${total}] 环境 ${envName || envId} 执行完成`, 'success');
+        const scriptModule = this.loadScript(scriptMeta.path);
+        const executeFn = typeof scriptModule === 'function' 
+          ? scriptModule 
+          : scriptModule.execute;
+
+        const scriptLabel = `[${index}/${total}][脚本 ${si + 1}/${task.scripts.length}] ${scriptMeta.displayName}`;
+
+        try {
+          this.emit('log', `${scriptLabel} 开始执行`, 'info');
+          await executeFn({
+            environmentId: envId,
+            environment: environment,
+            wsUrl: wsUrl,
+            debugPort: debugPort,
+            webdriver: webdriver,
+            client: this.client,
+            log: (message, type = 'info') => {
+              this.emit('log', `${scriptLabel} ${message}`, type);
+            }
+          });
+
+          this.runSummary.push({
+            envId,
+            envName,
+            script: scriptMeta.name,
+            displayName: scriptMeta.displayName,
+            status: 'success'
+          });
+
+          this.stats.completed++;
+          this.updateStats();
+          this.emit('log', `${scriptLabel} 执行完成`, 'success');
+        } catch (scriptError) {
+          this.runSummary.push({
+            envId,
+            envName,
+            script: scriptMeta.name,
+            displayName: scriptMeta.displayName,
+            status: 'failed',
+            error: scriptError.message
+          });
+
+          this.stats.failed++;
+          this.updateStats();
+          this.emit('log', `${scriptLabel} 执行失败: ${scriptError.message}`, 'error');
+          // 不中断后续脚本
+        }
+      }
     } catch (error) {
       this.stats.failed++;
       this.updateStats();
@@ -290,6 +367,34 @@ class ScriptController extends EventEmitter {
    */
   updateStats() {
     this.emit('status', { ...this.stats });
+  }
+
+  /**
+   * 写入本次运行总结日志
+   */
+  async writeRunSummary() {
+    try {
+      const logsDir = path.join(process.cwd(), 'logs');
+      if (!fs.existsSync(logsDir)) {
+        fs.mkdirSync(logsDir, { recursive: true });
+      }
+      const ts = new Date();
+      const tsLabel = ts.toISOString().replace(/[:.]/g, '-');
+      const filePath = path.join(logsDir, `run-${tsLabel}.json`);
+
+      const summary = {
+        startedAt: ts.toISOString(),
+        mode: this.mode,
+        scripts: this.scripts,
+        results: this.runSummary,
+        stats: this.stats
+      };
+
+      fs.writeFileSync(filePath, JSON.stringify(summary, null, 2), 'utf8');
+      this.emit('log', `执行结果已保存: ${filePath}`, 'info');
+    } catch (err) {
+      this.emit('log', `保存执行结果失败: ${err.message}`, 'warning');
+    }
   }
 
   /**
