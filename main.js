@@ -140,7 +140,16 @@ ipcMain.handle('save-config', async (event, config) => {
 ipcMain.handle('list-scripts', async () => {
   // 打包后文件在 app.asar 中，__dirname 会指向 app.asar 内的路径
   // 开发环境中，__dirname 指向项目根目录
-  const scriptsPath = path.join(__dirname, 'scripts');
+  let scriptsPath = path.join(__dirname, 'scripts');
+
+  // 如果 asar 内不存在，尝试 app.asar.unpacked（处理 asarUnpack 的情况）
+  if (!fs.existsSync(scriptsPath)) {
+    const unpacked = path.join(__dirname.replace(/app\.asar$/, 'app.asar.unpacked'), 'scripts');
+    if (fs.existsSync(unpacked)) {
+      scriptsPath = unpacked;
+    }
+  }
+
   const aliasPath = path.join(scriptsPath, 'script-alias.json');
   let aliasMap = {};
 

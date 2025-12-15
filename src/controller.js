@@ -107,19 +107,30 @@ class ScriptController extends EventEmitter {
    * 加载脚本模块
    */
   loadScript(scriptPath) {
-    try {
-      // 清除require缓存，确保每次都是最新代码
-      delete require.cache[require.resolve(path.resolve(scriptPath))];
-      const scriptModule = require(path.resolve(scriptPath));
-      
-      if (typeof scriptModule !== 'function' && typeof scriptModule.execute !== 'function') {
-        throw new Error('脚本必须导出execute函数或作为默认导出函数');
-      }
+    const tryPaths = [];
+    const resolved = path.resolve(scriptPath);
+    tryPaths.push(resolved);
 
-      return scriptModule;
-    } catch (error) {
-      throw new Error(`加载脚本失败: ${error.message}`);
+    // 如果在 asar 内，尝试 app.asar.unpacked
+    if (resolved.includes('app.asar')) {
+      const unpacked = resolved.replace('app.asar', path.join('app.asar.unpacked'));
+      tryPaths.push(unpacked);
     }
+
+    let lastErr;
+    for (const p of tryPaths) {
+      try {
+        delete require.cache[require.resolve(p)];
+        const mod = require(p);
+        if (typeof mod !== 'function' && typeof mod.execute !== 'function') {
+          throw new Error('脚本必须导出execute函数或作为默认导出函数');
+        }
+        return mod;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw new Error(`加载脚本失败: ${lastErr.message}`);
   }
 
   /**
