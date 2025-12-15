@@ -62,15 +62,19 @@ module.exports = async function execute(context) {
     // 优先通过 /json/version 获取完整 ws 端点（避免 404 错误）
     const url = `http://127.0.0.1:${port}/json/version`;
     try {
-      const res = await axios.get(url, { timeout: 3000 });
+      const res = await axios.get(url, { timeout: 5000 });
       if (res.data && res.data.webSocketDebuggerUrl) {
+        log(`通过 /json/version 获取到 WebSocket URL: ${res.data.webSocketDebuggerUrl}`, 'info');
         return res.data.webSocketDebuggerUrl;
       }
     } catch (err) {
-      // 忽略，走兜底
+      // 记录错误但不抛出，走兜底
+      log(`通过 /json/version 获取失败: ${err.message}，使用兜底方案`, 'warning');
     }
     // 兜底：直接拼接（有些版本可用）
-    return `ws://127.0.0.1:${port}/devtools/browser`;
+    const fallbackUrl = `ws://127.0.0.1:${port}/devtools/browser`;
+    log(`使用兜底 WebSocket URL: ${fallbackUrl}`, 'info');
+    return fallbackUrl;
   }
 
   // 等待页面稳定
@@ -233,17 +237,20 @@ module.exports = async function execute(context) {
   try {
     log('开始 X.com 浏览任务', 'info');
 
-    // 解析浏览器 ws 端点
-    log('解析浏览器 ws 端点...', 'info');
-    const wsEndpoint = await resolveWsEndpoint(debugPort || wsUrl);
-
     // 多次重试连接 ws 端点（处理环境刚启动时的 404/连接拒绝）
+    // 注意：每次重试都重新解析端点，因为浏览器可能需要时间完全启动
     const connectAttempts = 8;
     let lastErr;
     for (let i = 1; i <= connectAttempts; i++) {
       try {
+        // 每次重试都重新解析端点
+        log(`解析浏览器 ws 端点 (第${i}/${connectAttempts}次)...`, 'info');
+        const wsEndpoint = await resolveWsEndpoint(debugPort || wsUrl);
+        log(`WebSocket 端点: ${wsEndpoint}`, 'info');
+        
         log(`连接浏览器 (第${i}/${connectAttempts}次)...`, 'info');
         browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
+        log('浏览器连接成功', 'success');
         break;
       } catch (err) {
         lastErr = err;
