@@ -13,6 +13,7 @@
  */
 
 const puppeteer = require('puppeteer-core');
+const axios = require('axios');
 
 module.exports = async function execute(context) {
   const { wsUrl, debugPort, log } = context;
@@ -53,11 +54,22 @@ module.exports = async function execute(context) {
     if (wsUrl && wsUrl.startsWith('ws://')) {
       return wsUrl;
     }
-    // 否则从 debugPort 构建
-    const port = typeof portOrUrl === 'number' ? portOrUrl : parseInt(debugPort, 10);
+    // 否则从 portOrUrl 或 debugPort 构建（修复：应该使用 portOrUrl 参数，而不是直接使用 debugPort）
+    const port = typeof portOrUrl === 'number' ? portOrUrl : parseInt(portOrUrl, 10);
     if (Number.isNaN(port)) {
       throw new Error('未提供有效的 debugPort');
     }
+    // 优先通过 /json/version 获取完整 ws 端点（避免 404 错误）
+    const url = `http://127.0.0.1:${port}/json/version`;
+    try {
+      const res = await axios.get(url, { timeout: 3000 });
+      if (res.data && res.data.webSocketDebuggerUrl) {
+        return res.data.webSocketDebuggerUrl;
+      }
+    } catch (err) {
+      // 忽略，走兜底
+    }
+    // 兜底：直接拼接（有些版本可用）
     return `ws://127.0.0.1:${port}/devtools/browser`;
   }
 
@@ -221,39 +233,44 @@ module.exports = async function execute(context) {
   try {
     log('开始 X.com 浏览任务', 'info');
 
-    // 连接浏览器
-    log('连接浏览器...', 'info');
-    const wsEndpoint = await resolveWsEndpoint(debugPort);
-    
-    let connectAttempts = 0;
-    const maxConnectAttempts = 8;
-    while (connectAttempts < maxConnectAttempts) {
+    // 解析浏览器 ws 端点
+    log('解析浏览器 ws 端点...', 'info');
+    const wsEndpoint = await resolveWsEndpoint(debugPort || wsUrl);
+
+    // 多次重试连接 ws 端点（处理环境刚启动时的 404/连接拒绝）
+    const connectAttempts = 8;
+    let lastErr;
+    for (let i = 1; i <= connectAttempts; i++) {
       try {
-        browser = await puppeteer.connect({
-          browserWSEndpoint: wsEndpoint,
-          defaultViewport: null
-        });
-        log('浏览器连接成功', 'success');
+        log(`连接浏览器 (第${i}/${connectAttempts}次)...`, 'info');
+        browser = await puppeteer.connect({ browserWSEndpoint: wsEndpoint });
         break;
-      } catch (error) {
-        connectAttempts++;
-        if (connectAttempts >= maxConnectAttempts) {
-          throw new Error(`连接浏览器失败（已重试${maxConnectAttempts}次）: ${error.message}`);
+      } catch (err) {
+        lastErr = err;
+        log(`连接失败: ${err.message}`, 'warning');
+        if (i < connectAttempts) {
+          await delay(4000); // 增加等待时间，参考 neuraverse-daily.js
         }
-        log(`连接浏览器失败，重试 ${connectAttempts}/${maxConnectAttempts}...`, 'warning');
-        await delay(2500);
       }
     }
-
-    // 获取或创建页面
-    const pages = await browser.pages();
-    if (pages.length > 0) {
-      page = pages[0];
-      log('使用现有页面', 'info');
-    } else {
-      page = await browser.newPage();
-      log('创建新页面', 'info');
+    if (!browser) {
+      throw lastErr || new Error('无法连接到浏览器 ws 端点');
     }
+    
+    // 等待浏览器完全初始化
+    log('等待浏览器初始化...', 'info');
+    await delay(4000);
+    
+    // 获取所有页面，确保浏览器已准备好
+    const pages = await browser.pages();
+    log(`浏览器已连接，当前有 ${pages.length} 个标签页`, 'info');
+
+    // 创建新标签页
+    log('创建新标签页...', 'info');
+    page = await browser.newPage();
+    
+    // 等待新标签页完全加载
+    await delay(3000);
 
     // 设置视口大小（模拟真实设备）
     await page.setViewport({
@@ -332,15 +349,33 @@ module.exports = async function execute(context) {
     log(`任务失败: ${error.message}`, 'error');
     throw error;
   } finally {
-    // 断开浏览器连接（不关闭窗口，由控制器管理）
+    // 注意：这里只断开 Puppeteer 连接，不关闭浏览器窗口
+    // 浏览器窗口的关闭由控制器负责（通过 MoreLogin API）
     if (browser) {
       try {
-        await browser.disconnect();
+        // 断开连接，但不关闭浏览器窗口
+        const pages = await browser.pages();
+        for (const page of pages) {
+          try {
+            await page.close();
+          } catch (_) {
+            // ignore
+          }
+        }
+        // 断开连接
+        browser.disconnect();
         log('已断开浏览器连接（窗口由控制器关闭）', 'info');
-      } catch (error) {
-        log(`断开连接失败: ${error.message}`, 'warning');
+      } catch (err) {
+        log(`断开浏览器连接时出错: ${err.message}`, 'warning');
+        // 如果断开失败，尝试关闭（作为兜底）
+        try {
+          await browser.close();
+        } catch (_) {
+          // ignore
+        }
       }
     }
   }
 };
+
 
