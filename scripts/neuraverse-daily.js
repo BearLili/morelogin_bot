@@ -385,30 +385,13 @@ module.exports = async function execute(context) {
     log(`任务失败: ${error.message}`, 'error');
     throw error;
   } finally {
-    // 注意：这里只断开 Puppeteer 连接，不关闭浏览器窗口
-    // 浏览器窗口的关闭由控制器负责（通过 MoreLogin API）
     if (browser) {
       try {
-        // 断开连接，但不关闭浏览器窗口
-        const pages = await browser.pages();
-        for (const page of pages) {
-          try {
-            await page.close();
-          } catch (_) {
-            // ignore
-          }
-        }
-        // 断开连接
-        browser.disconnect();
+        // 仅断开连接，不关闭窗口/标签，由控制器统一处理
+        await browser.disconnect();
         log('已断开浏览器连接（窗口由控制器关闭）', 'info');
       } catch (err) {
         log(`断开浏览器连接时出错: ${err.message}`, 'warning');
-        // 如果断开失败，尝试关闭（作为兜底）
-        try {
-          await browser.close();
-        } catch (_) {
-          // ignore
-        }
       }
     }
   }

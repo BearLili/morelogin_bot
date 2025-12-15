@@ -78,19 +78,11 @@ module.exports = async function execute(context) {
   } finally {
     if (browser) {
       try {
-        const pages = await browser.pages();
-        for (const p of pages) {
-          try {
-            await p.close();
-          } catch (_) {}
-        }
-        browser.disconnect();
+        // 仅断开 Puppeteer 连接，不关闭窗口或标签页，窗口由控制器统一关闭
+        await browser.disconnect();
         log('已断开浏览器连接（窗口由控制器关闭）', 'info');
       } catch (err) {
         log(`断开浏览器连接时出错: ${err.message}`, 'warning');
-        try {
-          await browser.close();
-        } catch (_) {}
       }
     }
   }
