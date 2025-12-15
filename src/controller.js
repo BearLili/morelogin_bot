@@ -111,9 +111,13 @@ class ScriptController extends EventEmitter {
     const resolved = path.resolve(scriptPath);
     tryPaths.push(resolved);
 
-    // 如果在 asar 内，尝试 app.asar.unpacked
-    if (resolved.includes('app.asar')) {
-      const unpacked = resolved.replace('app.asar', path.join('app.asar.unpacked'));
+    // 如果在 asar 内，尝试构造 app.asar.unpacked 路径
+    const asarToken = 'app.asar';
+    const idx = resolved.indexOf(asarToken);
+    if (idx >= 0) {
+      const prefix = resolved.slice(0, idx);
+      const suffix = resolved.slice(idx + asarToken.length); // 带前导分隔符
+      const unpacked = path.join(prefix, 'app.asar.unpacked', suffix.replace(/^[/\\]/, ''));
       tryPaths.push(unpacked);
     }
 
@@ -130,7 +134,7 @@ class ScriptController extends EventEmitter {
         lastErr = err;
       }
     }
-    throw new Error(`加载脚本失败: ${lastErr.message}`);
+    throw new Error(`加载脚本失败: ${lastErr?.message || 'unknown error'}`);
   }
 
   /**
