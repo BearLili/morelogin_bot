@@ -107,14 +107,24 @@ class ScriptController extends EventEmitter {
    * 加载脚本模块
    */
   loadScript(scriptPath) {
+    // 修复路径：如果路径格式不对（缺少反斜杠），尝试修复
+    let fixedPath = scriptPath;
+    // 检测 Windows 路径格式错误：如 "D:morelogin_botdist" 应该是 "D:\morelogin_bot\dist"
+    if (fixedPath.match(/^[A-Z]:[^\\/]/)) {
+      // 在冒号后、目录名前插入反斜杠
+      fixedPath = fixedPath.replace(/^([A-Z]:)([^\\/])/, '$1\\$2');
+      // 在常见目录名后插入反斜杠（如 dist, resources, app.asar, scripts）
+      fixedPath = fixedPath.replace(/(dist|resources|app\.asar|scripts)([^\\/])/g, '$1\\$2');
+    }
+    
     const tryPaths = [];
-    const resolved = path.resolve(scriptPath);
+    const resolved = path.resolve(fixedPath);
     tryPaths.push(resolved);
 
     // 如果在 asar 内，尝试构造 app.asar.unpacked 路径
-    const asarToken = path.join('app.asar');
+    const asarToken = 'app.asar';
     const normalized = resolved.replace(/\\/g, '/'); // 统一使用 / 进行字符串操作
-    const idx = normalized.indexOf(asarToken.replace(/\\/g, '/'));
+    const idx = normalized.indexOf(asarToken);
     if (idx >= 0) {
       const prefix = resolved.substring(0, idx);
       const suffix = resolved.substring(idx + asarToken.length);
@@ -125,10 +135,12 @@ class ScriptController extends EventEmitter {
     }
 
     let lastErr;
+    const errors = [];
     for (const p of tryPaths) {
       try {
         // 确保路径存在
         if (!fs.existsSync(p)) {
+          errors.push(`路径不存在: ${p}`);
           continue;
         }
         delete require.cache[require.resolve(p)];
@@ -139,13 +151,15 @@ class ScriptController extends EventEmitter {
         return mod;
       } catch (err) {
         lastErr = err;
-        // 记录尝试的路径以便调试
-        if (err.code === 'MODULE_NOT_FOUND') {
-          lastErr.message = `${err.message}\n尝试路径: ${p}`;
-        }
+        const errMsg = err.code === 'MODULE_NOT_FOUND' 
+          ? `模块未找到: ${p}` 
+          : `${err.message} (路径: ${p})`;
+        errors.push(errMsg);
       }
     }
-    throw new Error(`加载脚本失败: ${lastErr?.message || 'unknown error'}`);
+    
+    const errorDetails = errors.length > 0 ? '\n尝试的路径:\n' + errors.join('\n') : '';
+    throw new Error(`加载脚本失败: ${lastErr?.message || 'unknown error'}${errorDetails}\n原始路径: ${scriptPath}\n修复后路径: ${fixedPath}`);
   }
 
   /**

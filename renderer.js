@@ -1,4 +1,5 @@
 const { ipcRenderer } = require('electron');
+const path = require('path');
 const ScriptController = require('./src/controller');
 const MoreLoginClient = require('./src/morelogin-client');
 
@@ -93,9 +94,15 @@ async function loadScripts() {
   scripts.forEach(script => {
     const li = document.createElement('li');
     li.className = 'script-item';
+    
+    // 转义路径中的特殊字符，确保在 HTML 属性中正确传递
+    const escapedPath = script.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    const escapedName = script.name.replace(/'/g, "\\'");
+    const escapedDisplayName = (script.displayName || script.name).replace(/'/g, "\\'");
+    
     li.innerHTML = `
       <label style="display:flex; align-items:center; gap:8px; cursor:pointer; padding:6px 8px;">
-        <input type="checkbox" style="width:16px;height:16px;" onchange="toggleScript('${script.path}', '${script.name.replace(/'/g, "\\'")}', '${(script.displayName || script.name).replace(/'/g, "\\'")}')">
+        <input type="checkbox" style="width:16px;height:16px;" onchange="toggleScript('${escapedPath}', '${escapedName}', '${escapedDisplayName}')">
         <div style="display:flex;flex-direction:column;gap:2px;">
           <span style="font-weight:600;">${script.displayName || script.name}</span>
           <span style="font-size:12px;color:#666;">${script.name}</span>
