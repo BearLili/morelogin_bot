@@ -167,11 +167,15 @@ ipcMain.handle('list-scripts', async () => {
       fs.mkdirSync(scriptsPath, { recursive: true });
     }
     const files = fs.readdirSync(scriptsPath);
-    return files.filter(f => f.endsWith('.js')).map(f => ({
-      name: f.replace('.js', ''),
-      displayName: aliasMap[f] || aliasMap[f.replace('.js', '')] || f.replace('.js', ''),
-      path: path.join(scriptsPath, f)
-    }));
+    return files.filter(f => f.endsWith('.js')).map(f => {
+      const scriptPath = path.join(scriptsPath, f);
+      // 确保返回标准化路径（Windows 使用反斜杠）
+      return {
+        name: f.replace('.js', ''),
+        displayName: aliasMap[f] || aliasMap[f.replace('.js', '')] || f.replace('.js', ''),
+        path: path.normalize(scriptPath)
+      };
+    });
   } catch (error) {
     console.error('Error listing scripts:', error);
     logError('Error listing scripts', error);
