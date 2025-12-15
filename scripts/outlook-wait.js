@@ -63,10 +63,13 @@ module.exports = async function execute(context) {
     await page.setViewport({ width: 1920, height: 1080 });
 
     log(`正在打开 ${targetUrl}...`, 'info');
-    await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+    // 有些页面长时间保持网络连接，networkidle 可能不触发，改用 domcontentloaded 并增加兜底
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    log('导航完成，等待可见元素...', 'info');
 
-    // 等待页面主要区域（如果有）
+    // 等待页面主要区域（如果有），失败也继续
     await page.waitForSelector('[role="main"]', { timeout: 15000 }).catch(() => {});
+    log('检测到页面主要区域或已超时，继续后续等待', 'info');
 
     log(`页面加载完成，等待 ${waitAfterLoadMs / 1000} 秒...`, 'info');
     await delay(waitAfterLoadMs);
