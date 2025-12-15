@@ -20,7 +20,7 @@ module.exports = async function execute(context) {
 
   // 可调参数
   const targetUrl = 'https://x.com/home';
-  const maxScrollAttempts = 30; // 最大滚动次数（增加到30次，更真实的浏览时长）
+  const maxScrollAttempts = 20; // 最大滚动次数（增加到30次，更真实的浏览时长）
   const minScrollDelay = 3000; // 最小滚动间隔（毫秒）- 增加到3秒
   const maxScrollDelay = 10000; // 最大滚动间隔（毫秒）- 增加到10秒
   const minReadTime = 5000; // 最小阅读时间（毫秒）- 增加到5秒
@@ -41,7 +41,7 @@ module.exports = async function execute(context) {
   // 随机滚动距离
   const randomScrollDistance = () => {
     // 随机滚动 200-800 像素
-    return Math.floor(Math.random() * 600) + 200;
+    return Math.floor(Math.random() * 1200) + 300;
   };
 
   async function resolveWsEndpoint(portOrUrl) {

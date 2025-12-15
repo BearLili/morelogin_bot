@@ -341,10 +341,15 @@ async function startExecution() {
 }
 
 // 停止执行
-function stopExecution() {
+async function stopExecution() {
   if (controller) {
-    controller.stop();
     addLog('正在停止执行...', 'warning');
+    try {
+      await controller.stop();
+      addLog('已停止所有任务', 'warning');
+    } catch (error) {
+      addLog(`停止失败: ${error.message}`, 'error');
+    }
   }
 }
 

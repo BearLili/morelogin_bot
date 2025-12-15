@@ -7,7 +7,8 @@ class ScriptController extends EventEmitter {
     super();
     this.client = client;
     this.maxConcurrent = maxConcurrent;
-    this.runningTasks = new Map();
+    this.runningTasks = new Map(); // 存储任务 Promise
+    this.taskMap = new Map(); // 存储任务信息（用于停止时查找环境）
     this.taskQueue = [];
     this.isStopped = false;
     this.stats = {
@@ -104,6 +105,12 @@ class ScriptController extends EventEmitter {
       }
     }
 
+    // 如果已停止，不等待剩余任务完成
+    if (this.isStopped) {
+      this.emit('log', '已停止，跳过等待剩余任务', 'warning');
+      return;
+    }
+    
     // 等待所有剩余任务完成
     if (this.runningTasks.size > 0) {
       await Promise.all(Array.from(this.runningTasks.values()));
@@ -117,9 +124,13 @@ class ScriptController extends EventEmitter {
     this.stats.running++;
     this.updateStats();
 
+    // 保存任务信息到 taskMap，以便停止时能查找
+    this.taskMap.set(task.id, task);
+
     const taskPromise = this.runTask(task, scriptModule)
       .finally(() => {
         this.runningTasks.delete(task.id);
+        this.taskMap.delete(task.id); // 清理任务信息
         this.stats.running--;
         this.updateStats();
       });
@@ -139,6 +150,12 @@ class ScriptController extends EventEmitter {
     let shouldCloseEnvironment = false; // 标记是否需要关闭环境
 
     try {
+      // 检查是否已停止
+      if (this.isStopped) {
+        this.emit('log', `[${index}/${total}] 任务已停止，跳过执行`, 'warning');
+        return;
+      }
+
       this.emit('log', `[${index}/${total}] 开始执行环境: ${envName || envId} (ID: ${envId})`, 'info');
       this.emit('log', `[${index}/${total}] 等待可用窗口槽位... (当前运行: ${this.runningTasks.size}/${this.maxConcurrent})`, 'info');
 
@@ -168,6 +185,12 @@ class ScriptController extends EventEmitter {
       const wsUrl = `ws://127.0.0.1:${debugPort}/devtools/browser`;
       
       this.emit('log', `[${index}/${total}] 环境窗口已打开 (debugPort: ${debugPort}, 运行中: ${this.runningTasks.size}/${this.maxConcurrent})`, 'success');
+
+      // 再次检查是否已停止（启动环境后）
+      if (this.isStopped) {
+        this.emit('log', `[${index}/${total}] 任务已停止，跳过脚本执行`, 'warning');
+        return;
+      }
 
       // 执行脚本
       const executeFn = typeof scriptModule === 'function' 
@@ -272,10 +295,46 @@ class ScriptController extends EventEmitter {
   /**
    * 停止执行
    */
-  stop() {
+  async stop() {
     this.isStopped = true;
     this.taskQueue = []; // 清空队列
+    
+    this.emit('log', '正在停止所有任务...', 'warning');
+    
+    // 关闭所有正在运行的环境
+    const closePromises = [];
+    for (const [taskId] of this.runningTasks.entries()) {
+      const task = this.taskMap.get(taskId);
+      if (task && task.environment) {
+        const envId = task.environment.Id || task.environment.id || task.environment.environment_id;
+        const envName = task.environment.envName || task.environment.name || envId;
+        if (envId) {
+          this.emit('log', `正在关闭环境: ${envName} (ID: ${envId})...`, 'warning');
+          closePromises.push(
+            this.client.closeEnvironment(envId).catch(err => {
+              this.emit('log', `关闭环境 ${envName} 失败: ${err.message}`, 'warning');
+            })
+          );
+        }
+      }
+    }
+    
+    // 等待所有环境关闭完成（最多等待5秒）
+    if (closePromises.length > 0) {
+      await Promise.race([
+        Promise.all(closePromises),
+        new Promise(resolve => setTimeout(resolve, 5000))
+      ]);
+    }
+    
+    // 清空运行中的任务
+    this.runningTasks.clear();
+    this.stats.running = 0;
+    this.updateStats();
+    
+    this.emit('log', '已停止所有任务', 'warning');
   }
+
 }
 
 module.exports = ScriptController;
