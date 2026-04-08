@@ -1,14 +1,69 @@
 const { ipcRenderer } = require('electron');
 const path = require('path');
+const crypto = require('crypto');
 const ScriptController = require('./src/controller');
 const MoreLoginClient = require('./src/morelogin-client');
 
+/** 一次「开始执行」内，所有窗口共享；每条话术全局仅用一次，用尽后中止整批任务 */
+function shuffleInPlace(arr) {
+  const a = arr;
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+function messagePoolFingerprint(poolLines) {
+  const unique = [...new Set(poolLines.map((s) => String(s).trim()).filter(Boolean))].sort();
+  return crypto.createHash('sha256').update(unique.join('\u0001')).digest('hex').slice(0, 24);
+}
+
+function createGlobalMessagePoolSession() {
+  const session = {
+    _chain: Promise.resolve(),
+    fp: null,
+    remaining: null,
+    /**
+     * 串行领取下一条未使用话术（跨窗口、跨并发安全）
+     */
+    claim(poolLines) {
+      const unique = [...new Set(poolLines.map((s) => String(s).trim()).filter(Boolean))];
+      if (unique.length === 0) {
+        session._chain = session._chain.then(() => null);
+        return session._chain;
+      }
+      const fp = messagePoolFingerprint(unique);
+      session._chain = session._chain.then(() => {
+        if (session.fp !== fp) {
+          session.fp = fp;
+          session.remaining = shuffleInPlace([...unique]);
+        }
+        if (!session.remaining || session.remaining.length === 0) return null;
+        return session.remaining.shift();
+      });
+      return session._chain;
+    },
+    /** 当前指纹下是否已领完（仅在同一会话、同一话术库下有效） */
+    isExhausted(poolLines) {
+      const unique = [...new Set(poolLines.map((s) => String(s).trim()).filter(Boolean))];
+      if (unique.length === 0) return false;
+      const fp = messagePoolFingerprint(unique);
+      if (session.fp !== fp) return false;
+      return !session.remaining || session.remaining.length === 0;
+    }
+  };
+  return session;
+}
+
 let controller = null;
 let selectedScripts = new Map(); // key: script.path, value: script object
+let scriptInputs = new Map(); // key: script.path, value: runtime input object
 let isRunning = false;
 let allEnvironments = [];
 let selectedEnvironmentIds = new Set();
 let executionMode = 'perEnv'; // perEnv: 单窗口执行所有脚本；perScript: 所有窗口先跑脚本1，再脚本2
+let loopWaitTimer = null;
 
 // 初始化
 async function init() {
@@ -119,11 +174,100 @@ async function loadScripts() {
 function toggleScript(path, name, displayName) {
   if (selectedScripts.has(path)) {
     selectedScripts.delete(path);
+    scriptInputs.delete(path);
   } else {
     selectedScripts.set(path, { path, name, displayName });
+    if (!scriptInputs.has(path)) {
+      scriptInputs.set(path, {
+        urlsText: '',
+        messageText: '',
+        waitSecondsText: '12',
+        randomizeLinkOrder: false
+      });
+    }
   }
+  renderScriptParamsForm();
   const count = selectedScripts.size;
   addLog(`已选择脚本数: ${count}`, 'info');
+}
+
+function scriptSupportsUrlInput(script) {
+  const key = `${script.name || ''} ${script.displayName || ''}`.toLowerCase();
+  return key.includes('discord') || key.includes('dc') || key.includes('tg') || key.includes('telegram');
+}
+
+function updateScriptInput(path, key, value) {
+  const prev = scriptInputs.get(path) || {};
+  scriptInputs.set(path, { ...prev, [key]: value });
+}
+
+function renderScriptParamsForm() {
+  const container = document.getElementById('scriptParamsContainer');
+  if (!container) return;
+
+  if (selectedScripts.size === 0) {
+    container.innerHTML = '<div style="color:#999; font-size:12px;">勾选脚本后，可在这里输入该脚本专属参数</div>';
+    return;
+  }
+
+  const blocks = Array.from(selectedScripts.values()).map((script, idx) => {
+    const input = scriptInputs.get(script.path) || {
+      urlsText: '',
+      messageText: '',
+      waitSecondsText: '12',
+      randomizeLinkOrder: false
+    };
+    const escapedPath = script.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+    const title = script.displayName || script.name;
+
+    if (!scriptSupportsUrlInput(script)) {
+      return `
+        <div style="border:1px solid #e5e5e5; border-radius:6px; background:#fff; padding:10px;">
+          <div style="font-weight:600; margin-bottom:6px;">${idx + 1}. ${title}</div>
+          <div style="font-size:12px; color:#888;">当前脚本暂无 URL 输入项（保留默认执行方式）</div>
+        </div>
+      `;
+    }
+
+    return `
+      <div style="border:1px solid #d9edf7; border-radius:6px; background:#fff; padding:10px;">
+        <div style="font-weight:600; margin-bottom:8px;">${idx + 1}. ${title}</div>
+        <div style="font-size:12px; color:#666; margin-bottom:4px;">URL 列表（支持英文逗号、中文逗号、换行分隔）</div>
+        <textarea
+          style="width:100%; min-height:72px; border:1px solid #ddd; border-radius:4px; padding:8px; font-family:monospace; font-size:12px;"
+          placeholder="https://discord.com/channels/a/b, https://discord.com/channels/a/c"
+          oninput="updateScriptInput('${escapedPath}', 'urlsText', this.value)"
+        >${input.urlsText || ''}</textarea>
+
+        <div style="font-size:12px; color:#666; margin:8px 0 4px;">默认发言内容（可空；支持数组：用 | 或 ｜ 分隔）</div>
+        <input
+          type="text"
+          value="${(input.messageText || '').replace(/"/g, '&quot;')}"
+          placeholder="例如：gm|hello everyone|any updates today?"
+          oninput="updateScriptInput('${escapedPath}', 'messageText', this.value)"
+        />
+
+        <div style="font-size:12px; color:#666; margin:8px 0 4px;">每个链接发送后等待秒数（支持区间，如 10-20）</div>
+        <input
+          type="text"
+          value="${String(input.waitSecondsText || '12').replace(/"/g, '&quot;')}"
+          placeholder="例如：12 或 10-20"
+          oninput="updateScriptInput('${escapedPath}', 'waitSecondsText', this.value)"
+        />
+        <label style="display:flex; align-items:center; gap:6px; margin-top:8px; font-size:12px; color:#555;">
+          <input
+            type="checkbox"
+            style="width:16px; height:16px;"
+            ${input.randomizeLinkOrder ? 'checked' : ''}
+            onchange="updateScriptInput('${escapedPath}', 'randomizeLinkOrder', this.checked)"
+          />
+          <span>URL 随机顺序（每轮打乱一次）</span>
+        </label>
+      </div>
+    `;
+  });
+
+  container.innerHTML = blocks.join('');
 }
 
 // 切换执行模式
@@ -344,6 +488,9 @@ async function startExecution() {
     addLog(`注意: 选择了 ${environments.length} 个环境，但最大并发数为 ${config.maxConcurrent}，将按顺序执行`, 'warning');
   }
 
+  const loopMode = !!document.getElementById('loopMode')?.checked;
+  const loopIntervalMinutes = Math.max(1, parseInt(document.getElementById('loopIntervalMinutes')?.value || '10', 10));
+
   isRunning = true;
   updateStatus('running');
   document.getElementById('startBtn').disabled = true;
@@ -371,24 +518,61 @@ async function startExecution() {
     }
     addLog('MoreLogin服务连接成功', 'success');
 
-    controller = new ScriptController(client, config.maxConcurrent);
-
-    // 设置事件监听
-    controller.on('log', (message, type) => {
-      addLog(message, type);
-    });
-
-    controller.on('status', (status) => {
-      updateStatus(status.running > 0 ? 'running' : 'idle');
-      document.getElementById('runningCount').textContent = status.running;
-      document.getElementById('completedCount').textContent = status.completed;
-      document.getElementById('failedCount').textContent = status.failed;
-    });
+    const globalMessagePoolSession = createGlobalMessagePoolSession();
 
     // 执行脚本（传入选中的环境列表及脚本列表+模式）
-    await controller.executeScripts(Array.from(selectedScripts.values()), environments, executionMode);
-    
-    addLog('所有任务执行完成', 'success');
+    const selectedScriptsWithInput = Array.from(selectedScripts.values()).map((script) => {
+      const input = scriptInputs.get(script.path) || {};
+      return {
+        ...script,
+        scriptInput: { ...input, globalMessagePoolSession }
+      };
+    });
+
+    let round = 1;
+    do {
+      if (!isRunning) break;
+      addLog(`开始第 ${round} 轮执行`, 'info');
+
+      controller = new ScriptController(client, config.maxConcurrent);
+
+      // 设置事件监听
+      controller.on('log', (message, type) => {
+        addLog(message, type);
+      });
+
+      controller.on('status', (status) => {
+        updateStatus(status.running > 0 ? 'running' : 'idle');
+        document.getElementById('runningCount').textContent = status.running;
+        document.getElementById('completedCount').textContent = status.completed;
+        document.getElementById('failedCount').textContent = status.failed;
+      });
+
+      await controller.executeScripts(selectedScriptsWithInput, environments, executionMode, {
+        globalMessagePoolSession
+      });
+
+      if (controller.poolExhaustedStop) {
+        addLog('话术池已用尽，本次点击启动的完整流程已结束（含后续循环）', 'warning');
+        isRunning = false;
+        break;
+      }
+
+      addLog(`第 ${round} 轮执行完成`, 'success');
+      round++;
+
+      if (!loopMode || !isRunning) break;
+
+      const waitMs = loopIntervalMinutes * 60 * 1000;
+      addLog(`循环模式已启用，等待 ${loopIntervalMinutes} 分钟后开始下一轮`, 'info');
+      await waitForNextRound(waitMs);
+    } while (isRunning);
+
+    if (isRunning) {
+      addLog('所有任务执行完成', 'success');
+    } else {
+      addLog('执行已停止', 'warning');
+    }
   } catch (error) {
     addLog('执行出错: ' + error.message, 'error');
     console.error(error);
@@ -400,8 +584,26 @@ async function startExecution() {
   }
 }
 
+function waitForNextRound(waitMs) {
+  return new Promise((resolve) => {
+    if (!isRunning || waitMs <= 0) {
+      resolve();
+      return;
+    }
+    loopWaitTimer = setTimeout(() => {
+      loopWaitTimer = null;
+      resolve();
+    }, waitMs);
+  });
+}
+
 // 停止执行
 async function stopExecution() {
+  isRunning = false;
+  if (loopWaitTimer) {
+    clearTimeout(loopWaitTimer);
+    loopWaitTimer = null;
+  }
   if (controller) {
     addLog('正在停止执行...', 'warning');
     try {

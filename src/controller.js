@@ -16,13 +16,14 @@ class ScriptController extends EventEmitter {
       completed: 0,
       failed: 0
     };
+    this.poolExhaustedStop = false;
   }
 
   /**
    * 执行脚本（兼容旧接口）
    */
   async executeScript(scriptPath, environments = null) {
-    return this.executeScripts([{ path: scriptPath, name: path.basename(scriptPath) }], environments, 'perEnv');
+    return this.executeScripts([{ path: scriptPath, name: path.basename(scriptPath) }], environments, 'perEnv', {});
   }
 
   /**
@@ -30,12 +31,15 @@ class ScriptController extends EventEmitter {
    * @param {Array} scripts - [{path,name,displayName}]
    * @param {Array} environments - 环境列表
    * @param {string} mode - perEnv | perScript
+   * @param {object} options - { globalMessagePoolSession }
    */
-  async executeScripts(scripts, environments = null, mode = 'perEnv') {
+  async executeScripts(scripts, environments = null, mode = 'perEnv', options = {}) {
     this.isStopped = false;
+    this.poolExhaustedStop = false;
     this.runSummary = [];
     this.mode = mode;
     this.stats = { running: 0, completed: 0, failed: 0 };
+    this.globalMessagePoolSession = options.globalMessagePoolSession || null;
 
     if (!Array.isArray(scripts) || scripts.length === 0) {
       throw new Error('未选择脚本');
@@ -45,7 +49,8 @@ class ScriptController extends EventEmitter {
     this.scripts = scripts.map((s) => ({
       path: s.path,
       name: s.name || s.path,
-      displayName: s.displayName || s.name || path.basename(s.path)
+      displayName: s.displayName || s.name || path.basename(s.path),
+      scriptInput: s.scriptInput || s.input || {}
     }));
 
     // 获取环境列表
@@ -296,6 +301,11 @@ class ScriptController extends EventEmitter {
             wsUrl: wsUrl,
             debugPort: debugPort,
             webdriver: webdriver,
+            scriptInput: scriptMeta.scriptInput || {},
+            globalMessagePoolSession:
+              this.globalMessagePoolSession ||
+              scriptMeta.scriptInput?.globalMessagePoolSession ||
+              null,
             client: this.client,
             log: (message, type = 'info') => {
               this.emit('log', `${scriptLabel} ${message}`, type);
@@ -314,18 +324,35 @@ class ScriptController extends EventEmitter {
           this.updateStats();
           this.emit('log', `${scriptLabel} 执行完成`, 'success');
         } catch (scriptError) {
+          const poolDone =
+            scriptError.code === 'POOL_EXHAUSTED' ||
+            scriptError.message === 'MESSAGE_POOL_EXHAUSTED';
+          if (poolDone) {
+            this.isStopped = true;
+            this.taskQueue = [];
+            this.poolExhaustedStop = true;
+            this.emit(
+              'log',
+              '话术池已在全部窗口间用尽，已中止剩余任务队列（请下次点击「开始」再跑）',
+              'warning'
+            );
+          }
+
           this.runSummary.push({
             envId,
             envName,
             script: scriptMeta.name,
             displayName: scriptMeta.displayName,
-            status: 'failed',
+            status: poolDone ? 'stopped_pool' : 'failed',
             error: scriptError.message
           });
 
           this.stats.failed++;
           this.updateStats();
           this.emit('log', `${scriptLabel} 执行失败: ${scriptError.message}`, 'error');
+          if (poolDone) {
+            break;
+          }
           // 不中断后续脚本
         }
       }

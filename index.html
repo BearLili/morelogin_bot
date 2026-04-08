@@ -320,6 +320,13 @@
         </div>
 
         <div class="section">
+          <div class="section-title">脚本参数（按勾选显示）</div>
+          <div id="scriptParamsContainer" style="display: grid; gap: 10px;">
+            <div style="color:#999; font-size:12px;">勾选脚本后，可在这里输入该脚本专属参数</div>
+          </div>
+        </div>
+
+        <div class="section">
           <div class="section-title">选择环境</div>
           <div style="margin-bottom: 10px;">
             <button onclick="loadEnvironments()" class="btn-load-env" style="width: 100%; padding: 8px; margin-bottom: 8px; font-size: 13px; background: #9b59b6; color: white; border: none; border-radius: 4px; cursor: pointer; transition: background 0.3s;">加载环境列表</button>
@@ -347,6 +354,16 @@
 
         <div class="section">
           <div class="section-title">执行控制</div>
+          <div style="display:flex; gap:12px; align-items:center; margin-bottom:10px; flex-wrap:wrap;">
+            <label style="display:flex; align-items:center; gap:6px; margin:0;">
+              <input type="checkbox" id="loopMode" style="width:16px; height:16px;">
+              <span style="font-size:13px; color:#333;">循环模式</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:6px; margin:0;">
+              <span style="font-size:13px; color:#555;">轮次间隔(分钟)</span>
+              <input type="number" id="loopIntervalMinutes" min="1" value="10" style="width:90px; padding:6px 8px;">
+            </label>
+          </div>
           <div class="control-buttons">
             <button class="btn-primary" onclick="startExecution()" id="startBtn">开始执行</button>
             <button class="btn-danger" onclick="stopExecution()" id="stopBtn" disabled>停止执行</button>
