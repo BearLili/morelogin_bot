@@ -22,8 +22,8 @@ function messagePoolFingerprint(poolLines) {
 function createGlobalMessagePoolSession() {
   const session = {
     _chain: Promise.resolve(),
-    fp: null,
-    remaining: null,
+    pools: {},
+    globalUsed: new Set(),
     /**
      * 串行领取下一条未使用话术（跨窗口、跨并发安全）
      */
@@ -35,12 +35,20 @@ function createGlobalMessagePoolSession() {
       }
       const fp = messagePoolFingerprint(unique);
       session._chain = session._chain.then(() => {
-        if (session.fp !== fp) {
-          session.fp = fp;
-          session.remaining = shuffleInPlace([...unique]);
+        if (!session.pools[fp]) {
+          session.pools[fp] = {
+            remaining: shuffleInPlace([...unique])
+          };
         }
-        if (!session.remaining || session.remaining.length === 0) return null;
-        return session.remaining.shift();
+        const state = session.pools[fp];
+        while (state.remaining.length > 0) {
+          const candidate = state.remaining.shift();
+          if (!session.globalUsed.has(candidate)) {
+            session.globalUsed.add(candidate);
+            return candidate;
+          }
+        }
+        return null;
       });
       return session._chain;
     },
@@ -49,8 +57,8 @@ function createGlobalMessagePoolSession() {
       const unique = [...new Set(poolLines.map((s) => String(s).trim()).filter(Boolean))];
       if (unique.length === 0) return false;
       const fp = messagePoolFingerprint(unique);
-      if (session.fp !== fp) return false;
-      return !session.remaining || session.remaining.length === 0;
+      if (!session.pools[fp]) return false;
+      return !session.pools[fp].remaining || session.pools[fp].remaining.length === 0;
     }
   };
   return session;
@@ -179,10 +187,10 @@ function toggleScript(path, name, displayName) {
     selectedScripts.set(path, { path, name, displayName });
     if (!scriptInputs.has(path)) {
       scriptInputs.set(path, {
-        urlsText: '',
-        messageText: '',
         waitSecondsText: '12',
-        randomizeLinkOrder: false
+        randomizeLinkOrder: false,
+        groupConfigs: [],
+        groupConfigText: ''
       });
     }
   }
@@ -201,6 +209,63 @@ function updateScriptInput(path, key, value) {
   scriptInputs.set(path, { ...prev, [key]: value });
 }
 
+function normalizeGroupConfigs(input) {
+  const list = Array.isArray(input) ? input : [];
+  return list.map((g, idx) => ({
+    id: g?.id || `g_${Date.now()}_${idx}`,
+    urlsText: String(g?.urlsText || ''),
+    messagesText: String(g?.messagesText || '')
+  }));
+}
+
+function buildGroupConfigText(groupConfigs) {
+  return normalizeGroupConfigs(groupConfigs)
+    .map((g, idx) => `group_${idx + 1}::${g.urlsText}::${g.messagesText}`)
+    .join('\n');
+}
+
+function ensureGroupConfigs(path) {
+  const prev = scriptInputs.get(path) || {};
+  const groupConfigs = normalizeGroupConfigs(prev.groupConfigs);
+  const next = {
+    ...prev,
+    groupConfigs,
+    groupConfigText: buildGroupConfigText(groupConfigs)
+  };
+  scriptInputs.set(path, next);
+  return next;
+}
+
+function addGroupRow(path) {
+  const next = ensureGroupConfigs(path);
+  next.groupConfigs.push({
+    id: `g_${Date.now()}_${Math.floor(Math.random() * 10000)}`,
+    urlsText: '',
+    messagesText: ''
+  });
+  next.groupConfigText = buildGroupConfigText(next.groupConfigs);
+  scriptInputs.set(path, next);
+  renderScriptParamsForm();
+}
+
+function removeGroupRow(path, groupId) {
+  const next = ensureGroupConfigs(path);
+  next.groupConfigs = next.groupConfigs.filter((g) => g.id !== groupId);
+  next.groupConfigText = buildGroupConfigText(next.groupConfigs);
+  scriptInputs.set(path, next);
+  renderScriptParamsForm();
+}
+
+function updateGroupRow(path, groupId, field, value) {
+  const next = ensureGroupConfigs(path);
+  next.groupConfigs = next.groupConfigs.map((g) => {
+    if (g.id !== groupId) return g;
+    return { ...g, [field]: String(value || '') };
+  });
+  next.groupConfigText = buildGroupConfigText(next.groupConfigs);
+  scriptInputs.set(path, next);
+}
+
 function renderScriptParamsForm() {
   const container = document.getElementById('scriptParamsContainer');
   if (!container) return;
@@ -211,11 +276,11 @@ function renderScriptParamsForm() {
   }
 
   const blocks = Array.from(selectedScripts.values()).map((script, idx) => {
-    const input = scriptInputs.get(script.path) || {
-      urlsText: '',
-      messageText: '',
+    const input = ensureGroupConfigs(script.path) || {
       waitSecondsText: '12',
-      randomizeLinkOrder: false
+      randomizeLinkOrder: false,
+      groupConfigs: [],
+      groupConfigText: ''
     };
     const escapedPath = script.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
     const title = script.displayName || script.name;
@@ -224,28 +289,39 @@ function renderScriptParamsForm() {
       return `
         <div style="border:1px solid #e5e5e5; border-radius:6px; background:#fff; padding:10px;">
           <div style="font-weight:600; margin-bottom:6px;">${idx + 1}. ${title}</div>
-          <div style="font-size:12px; color:#888;">当前脚本暂无 URL 输入项（保留默认执行方式）</div>
+          <div style="font-size:12px; color:#888;">这个脚本暂不需要频道分组配置，保持默认执行即可。</div>
         </div>
       `;
     }
 
+    const groupRows = (input.groupConfigs || []).map((group, gi) => {
+      const gid = String(group.id || '').replace(/"/g, '&quot;');
+      return `
+        <div style="border:1px solid #e6e6e6; border-radius:6px; padding:10px; background:#fcfcfc; margin-top:8px;">
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+            <div style="font-size:12px; font-weight:600; color:#333;">分组 ${gi + 1}</div>
+            <button type="button" style="padding:4px 8px; font-size:12px; background:#e74c3c;" onclick="removeGroupRow('${escapedPath}', '${gid}')">删除</button>
+          </div>
+          <div style="font-size:12px; color:#666; margin:8px 0 4px;">链接列表（逗号或换行分隔）</div>
+          <textarea
+            style="width:100%; min-height:58px; border:1px solid #ddd; border-radius:4px; padding:8px; font-family:monospace; font-size:12px;"
+            placeholder="https://discord.com/channels/a/1, https://discord.com/channels/a/2"
+            oninput="updateGroupRow('${escapedPath}', '${gid}', 'urlsText', this.value)"
+          >${group.urlsText || ''}</textarea>
+          <div style="font-size:12px; color:#666; margin:8px 0 4px;">话术池（使用 | 或 ｜ 分隔）</div>
+          <textarea
+            style="width:100%; min-height:52px; border:1px solid #ddd; border-radius:4px; padding:8px; font-family:monospace; font-size:12px;"
+            placeholder="你好|早上好|在吗"
+            oninput="updateGroupRow('${escapedPath}', '${gid}', 'messagesText', this.value)"
+          >${group.messagesText || ''}</textarea>
+        </div>
+      `;
+    }).join('');
+
     return `
       <div style="border:1px solid #d9edf7; border-radius:6px; background:#fff; padding:10px;">
         <div style="font-weight:600; margin-bottom:8px;">${idx + 1}. ${title}</div>
-        <div style="font-size:12px; color:#666; margin-bottom:4px;">URL 列表（支持英文逗号、中文逗号、换行分隔）</div>
-        <textarea
-          style="width:100%; min-height:72px; border:1px solid #ddd; border-radius:4px; padding:8px; font-family:monospace; font-size:12px;"
-          placeholder="https://discord.com/channels/a/b, https://discord.com/channels/a/c"
-          oninput="updateScriptInput('${escapedPath}', 'urlsText', this.value)"
-        >${input.urlsText || ''}</textarea>
-
-        <div style="font-size:12px; color:#666; margin:8px 0 4px;">默认发言内容（可空；支持数组：用 | 或 ｜ 分隔）</div>
-        <input
-          type="text"
-          value="${(input.messageText || '').replace(/"/g, '&quot;')}"
-          placeholder="例如：gm|hello everyone|any updates today?"
-          oninput="updateScriptInput('${escapedPath}', 'messageText', this.value)"
-        />
+        <div style="font-size:12px; color:#666; margin-bottom:6px;">按分组配置频道和话术：不同语言放不同组，执行更自然。</div>
 
         <div style="font-size:12px; color:#666; margin:8px 0 4px;">每个链接发送后等待秒数（支持区间，如 10-20）</div>
         <input
@@ -261,8 +337,13 @@ function renderScriptParamsForm() {
             ${input.randomizeLinkOrder ? 'checked' : ''}
             onchange="updateScriptInput('${escapedPath}', 'randomizeLinkOrder', this.checked)"
           />
-          <span>URL 随机顺序（每轮打乱一次）</span>
+          <span>组内链接随机顺序（每轮会重新打乱）</span>
         </label>
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-top:10px;">
+          <div style="font-size:12px; color:#666;">分组列表</div>
+          <button type="button" style="padding:4px 8px; font-size:12px; background:#2e86de;" onclick="addGroupRow('${escapedPath}')">新增分组</button>
+        </div>
+        ${groupRows || '<div style="font-size:12px; color:#999; margin-top:8px;">还没有分组，点击“新增分组”开始配置。</div>'}
       </div>
     `;
   });

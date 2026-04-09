@@ -81,13 +81,7 @@ module.exports = async function execute(context) {
     defaultWaitAfterSendMs: 12000,
     defaultWaitAfterSendMinMs: 12000,
     defaultWaitAfterSendMaxMs: 12000,
-    links: [
-      // {
-      //   url: 'https://discord.com/channels/1234567890/2345678901',
-      //   messages: ['hello channel A'],
-      //   waitAfterSendMs: 12000
-      // }
-    ],
+    groups: [],
   };
 
   let scenarioConfig = { ...defaultScenarioConfig };
@@ -141,6 +135,18 @@ module.exports = async function execute(context) {
     return localPoolRemaining.shift() || null;
   }
 
+  async function claimFromMessagePoolLines(poolLines) {
+    const list = [...new Set((poolLines || []).map((s) => String(s).trim()).filter(Boolean))];
+    if (list.length === 0) return null;
+    if (poolSession) {
+      return poolSession.claim(list);
+    }
+    if (!localPoolRemaining || localPoolRemaining.length === 0) {
+      localPoolRemaining = shuffleArray(list);
+    }
+    return localPoolRemaining.shift() || null;
+  }
+
   function parseUrlText(urlsText) {
     if (!urlsText || typeof urlsText !== 'string') return [];
     return urlsText
@@ -155,6 +161,23 @@ module.exports = async function execute(context) {
       .split(/[|｜]+/)
       .map((s) => String(s || '').trim())
       .filter((s) => s.length > 0);
+  }
+
+  function parseGroupConfigText(raw) {
+    const text = String(raw || '').trim();
+    if (!text) return [];
+    const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
+    const groups = [];
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const parts = line.split('::');
+      if (parts.length < 3) continue;
+      const urls = parseUrlText(parts[1]);
+      const messages = parseMessageText(parts[2]);
+      if (urls.length === 0 || messages.length === 0) continue;
+      groups.push({ name: `分组${i + 1}`, urls, messages });
+    }
+    return groups;
   }
 
   function parseWaitSecondsRange(raw) {
@@ -195,26 +218,19 @@ module.exports = async function execute(context) {
   }
 
   function applyRuntimeInputOverrides() {
-    const urls = parseUrlText(runtimeInput.urlsText);
     const waitRange = parseWaitSecondsRange(runtimeInput.waitSecondsText ?? runtimeInput.waitSeconds);
-    const messageText = String(runtimeInput.messageText || '').trim();
-    const messageList = parseMessageText(messageText);
     const randomizeOrder = !!runtimeInput.randomizeLinkOrder;
+    const groups = parseGroupConfigText(runtimeInput.groupConfigText);
 
-    if (urls.length > 0) {
+    if (groups.length > 0) {
       linkSequenceConfig.enabled = true;
       linkSequenceConfig.randomizeOrder = randomizeOrder;
-      linkSequenceConfig.links = urls.map((u) => ({
-        url: u,
-        messages: messageList.length > 0 ? messageList : undefined,
-      }));
-      log(`已应用 UI 输入链接，共 ${urls.length} 条${randomizeOrder ? '（随机顺序）' : '（顺序执行）'}`, 'info');
-    }
-
-    if (messageList.length > 0) {
-      chatConfig.source = 'array';
-      chatConfig.messages = messageList;
-      log(`已应用 UI 发言数组，共 ${messageList.length} 条`, 'info');
+      linkSequenceConfig.groups = groups;
+      log(`已应用分组配置，共 ${groups.length} 组${randomizeOrder ? '（组内随机顺序）' : ''}`, 'info');
+    } else {
+      linkSequenceConfig.enabled = false;
+      linkSequenceConfig.groups = [];
+      log('未配置分组，跳过链接聊天流程', 'warning');
     }
 
     if (waitRange) {
@@ -564,57 +580,50 @@ module.exports = async function execute(context) {
 
   async function runLinkSequence(page) {
     if (!linkSequenceConfig.enabled) return false;
-    const links = Array.isArray(linkSequenceConfig.links) ? linkSequenceConfig.links : [];
-    if (links.length === 0) {
-      log('linkSequence 已启用但 links 为空，跳过', 'warning');
+    const groups = Array.isArray(linkSequenceConfig.groups) ? linkSequenceConfig.groups : [];
+    if (groups.length === 0) {
+      log('linkSequence 已启用但无可执行链接，跳过', 'warning');
       return false;
     }
-
-    const workLinks = linkSequenceConfig.randomizeOrder ? shuffleArray(links) : [...links];
-    log(`开始执行链接顺序聊天，共 ${workLinks.length} 个链接${linkSequenceConfig.randomizeOrder ? '（本轮已随机打乱）' : ''}`, 'info');
     let successCount = 0;
+    for (const group of groups) {
+      const groupUrls = linkSequenceConfig.randomizeOrder ? shuffleArray(group.urls || []) : [...(group.urls || [])];
+      log(`开始执行分组 ${group.name}，共 ${groupUrls.length} 个链接${linkSequenceConfig.randomizeOrder ? '（组内已随机）' : ''}`, 'info');
 
-    for (let i = 0; i < workLinks.length; i++) {
-      const item = workLinks[i];
-      const url = String(item?.url || '').trim();
-      if (!url) {
-        log(`第 ${i + 1} 个链接为空，跳过`, 'warning');
-        if (linkSequenceConfig.stopOnError) break;
-        continue;
-      }
+      for (let i = 0; i < groupUrls.length; i++) {
+        const url = String(groupUrls[i] || '').trim();
+        if (!url) continue;
+        try {
+          await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+          await delay(channelOpenWaitMs);
+          log(`已打开分组 ${group.name} 链接(${i + 1}/${groupUrls.length}): ${url}`, 'info');
 
-      try {
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-        await delay(channelOpenWaitMs);
-        log(`已打开链接(${i + 1}/${workLinks.length}): ${url}`, 'info');
+          let msg = null;
+          if (Array.isArray(group.messages) && group.messages.length > 0) {
+            msg = await claimFromMessagePoolLines(group.messages);
+          } else if (uniquePool.length > 0) {
+            msg = await claimFromGlobalPool();
+          } else {
+            msg = await getNextMessage();
+          }
 
-        let msg = null;
-        if (uniquePool.length > 0) {
-          msg = await claimFromGlobalPool();
           if (!msg) {
             throw makePoolExhaustedError();
           }
-        } else {
-          msg = await getNextMessage();
-          if (!msg) {
-            log('当前链接未配置话术且无默认内容，跳过发送', 'warning');
-          }
-        }
 
-        if (msg) {
           const sent = await sendMessage(page, msg);
           if (sent) successCount += 1;
-        }
 
-        const waitMs = resolveWaitMs(item);
-        log(`链接停留等待 ${Math.floor(waitMs / 1000)} 秒`, 'info');
-        await delay(waitMs);
-      } catch (err) {
-        if (err?.code === 'POOL_EXHAUSTED' || err?.message === 'MESSAGE_POOL_EXHAUSTED') {
-          throw err;
+          const waitMs = resolveWaitMs({});
+          log(`链接停留等待 ${Math.floor(waitMs / 1000)} 秒`, 'info');
+          await delay(waitMs);
+        } catch (err) {
+          if (err?.code === 'POOL_EXHAUSTED' || err?.message === 'MESSAGE_POOL_EXHAUSTED') {
+            throw err;
+          }
+          log(`分组 ${group.name} 链接流程失败(${i + 1}/${groupUrls.length}): ${err.message}`, 'warning');
+          if (linkSequenceConfig.stopOnError) break;
         }
-        log(`链接流程失败(${i + 1}/${workLinks.length}): ${err.message}`, 'warning');
-        if (linkSequenceConfig.stopOnError) break;
       }
     }
 
@@ -640,11 +649,10 @@ module.exports = async function execute(context) {
     log('开始 Discord 浏览任务', 'info');
     applyRuntimeInputOverrides();
     initUniquePool();
-
-    const linkCount = Array.isArray(linkSequenceConfig.links) ? linkSequenceConfig.links.length : 0;
+    const groupCount = Array.isArray(linkSequenceConfig.groups) ? linkSequenceConfig.groups.length : 0;
     if (
       linkSequenceConfig.enabled &&
-      linkCount > 0 &&
+      groupCount > 0 &&
       uniquePool.length > 0 &&
       poolSession &&
       poolSession.isExhausted(uniquePool)
