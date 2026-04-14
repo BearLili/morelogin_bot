@@ -6,6 +6,8 @@
  * - 「开始执行」里勾选的环境数量须等于上述角色数；环境顺序 = 这些角色在剧本里首次出现的顺序
  * - 所有窗口进同一频道后，先「全员就位」再开聊；本地状态文件串行「抢麦」
  * - 同角色连续两句之间、换角色之间：秒级随机间隔（UI 可配，默认 10–30s / 30–60s）
+ * - 可选 scriptInput：roundtableSameSpeakerSettleMs（同角色连发前 UI 稳定等待，默认 2200）
+ *   roundtableMaxWallClockMin（整段最长分钟，默认 180，最少 35）
  *
  * 依赖：puppeteer-core、axios（与项目一致）
  */
@@ -31,7 +33,16 @@ module.exports = async function execute(context) {
   const channelOpenWaitMs = 3500;
   const pollMsMin = 600;
   const pollMsMax = 1400;
-  const maxIdleMs = 35 * 60 * 1000;
+  /** 整段剧本墙钟上限（含故意等待）；过短会导致长剧本后半段被误判超时 */
+  const wallClockMin = Math.max(
+    35,
+    parseInt(String(scriptInput.roundtableMaxWallClockMin || '180'), 10) || 180
+  );
+  const maxIdleMs = wallClockMin * 60 * 1000;
+  const sameSpeakerSettleMs = Math.max(
+    800,
+    parseInt(String(scriptInput.roundtableSameSpeakerSettleMs || '2200'), 10) || 2200
+  );
 
   let browser;
   let page;
@@ -224,37 +235,83 @@ module.exports = async function execute(context) {
 
   async function sendMessage(p, content) {
     if (!content) return false;
-    const editableSelectors = [
-      '[role="textbox"][contenteditable="true"]',
-      'div[contenteditable="true"][data-slate-editor="true"]',
-      'main form div[contenteditable="true"]'
-    ];
-    let selectorFound = null;
-    for (const sel of editableSelectors) {
-      const el = await p.$(sel);
-      if (el) {
-        selectorFound = sel;
-        break;
+    const normalize = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+    const shortNeedle = normalize(content).slice(0, 28);
+
+    async function waitForMessageEcho(needle, timeoutMs = 6500) {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < timeoutMs) {
+        try {
+          const hit = await p.evaluate((n) => {
+            const normalizeText = (x) => String(x || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            const needle = normalizeText(n);
+            if (!needle) return false;
+            const selectors = [
+              '[id^="message-content-"]',
+              '[data-list-item-id^="chat-messages"] [class*="messageContent"]',
+              '[data-list-item-id^="chat-messages"] [class*="markup"]'
+            ];
+            const nodes = selectors.flatMap((sel) => Array.from(document.querySelectorAll(sel)));
+            const tail = nodes.slice(-14);
+            return tail.some((el) => normalizeText(el.textContent).includes(needle));
+          }, needle);
+          if (hit) return true;
+        } catch (_) {}
+        await delay(260 + Math.floor(Math.random() * 220));
       }
-    }
-    if (!selectorFound) {
-      log('未找到聊天输入框', 'warning');
       return false;
     }
-    await p.click(selectorFound, { clickCount: 1 });
-    await delay(180 + Math.random() * 220);
-    const modKey = process.platform === 'darwin' ? 'Meta' : 'Control';
-    await p.keyboard.down(modKey);
-    await p.keyboard.press('KeyA');
-    await p.keyboard.up(modKey);
-    await p.keyboard.press('Backspace');
-    await delay(80 + Math.random() * 120);
-    await p.keyboard.type(content, { delay: 18 + Math.floor(Math.random() * 28) });
-    await delay(200 + Math.random() * 260);
-    await p.keyboard.press('Enter');
-    await delay(800 + Math.random() * 900);
-    log(`[${role}] 已发送: ${content}`, 'info');
-    return true;
+
+    async function trySendOnce() {
+      const editableSelectors = [
+        '[role="textbox"][contenteditable="true"]',
+        'div[contenteditable="true"][data-slate-editor="true"]',
+        'main form div[contenteditable="true"]'
+      ];
+      let selectorFound = null;
+      for (const sel of editableSelectors) {
+        const el = await p.$(sel);
+        if (el) {
+          selectorFound = sel;
+          break;
+        }
+      }
+      if (!selectorFound) {
+        log('未找到聊天输入框', 'warning');
+        return false;
+      }
+      await p.click(selectorFound, { clickCount: 1 });
+      await delay(180 + Math.random() * 220);
+      const modKey = process.platform === 'darwin' ? 'Meta' : 'Control';
+      await p.keyboard.down(modKey);
+      await p.keyboard.press('KeyA');
+      await p.keyboard.up(modKey);
+      await p.keyboard.press('Backspace');
+      await delay(80 + Math.random() * 120);
+      await p.keyboard.type(content, { delay: 18 + Math.floor(Math.random() * 28) });
+      await delay(200 + Math.random() * 260);
+      await p.keyboard.press('Enter');
+      return true;
+    }
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const sent = await trySendOnce();
+      if (!sent) return false;
+      // Discord 连续发第二条时，上一条若未落盘/输入框未清空，极易吞消息
+      await delay(1200 + Math.random() * 900);
+      const echoed = await waitForMessageEcho(shortNeedle, 6200);
+      if (echoed) {
+        log(`[${role}] 已发送(确认落地): ${content}`, 'info');
+        return true;
+      }
+      if (attempt < 2) {
+        log(`[${role}] 第 ${attempt} 次发送未确认落地，准备重试`, 'warning');
+        await delay(800 + Math.floor(Math.random() * 600));
+      }
+    }
+
+    log(`[${role}] 发送后未能确认消息落地: ${content}`, 'warning');
+    return false;
   }
 
   const lines = parseRoundtableLines(dialogueText);
@@ -336,7 +393,9 @@ module.exports = async function execute(context) {
       const following = nextIdx < st1.lines.length ? st1.lines[nextIdx] : null;
       if (following) {
         if (following.speaker === role) {
-          log(`同角色连续发言，等待 ${sameLo}-${sameHi}s（随机）…`, 'info');
+          log(`同角色连续：等待频道/UI 稳定 ${Math.round(sameSpeakerSettleMs / 100) / 10}s…`, 'info');
+          await delay(sameSpeakerSettleMs + Math.floor(Math.random() * 400));
+          log(`同角色连续发言，再等待 ${sameLo}-${sameHi}s（随机）…`, 'info');
           await randomDelaySecRangeLoHi(sameLo, sameHi);
         } else {
           log(`下一条由其他角色发送，间隔等待 ${betweenLo}-${betweenHi}s（随机）…`, 'info');
@@ -347,12 +406,21 @@ module.exports = async function execute(context) {
       let advanced = false;
       for (let att = 0; att < 8000 && !advanced; att++) {
         const sa = readState();
-        if (sa.nextIndex > idx) {
+        if (sa.nextIndex === nextIdx) {
           advanced = true;
           break;
         }
+        if (sa.nextIndex > nextIdx) {
+          throw new Error(
+            `回合索引异常：本句刚发完应推进到 ${nextIdx}，当前为 ${sa.nextIndex}，请检查是否多环境误配同一角色或手动改过状态文件`
+          );
+        }
         if (sa.nextIndex < idx) {
           throw new Error('回合索引倒退，状态文件异常');
+        }
+        if (sa.nextIndex !== idx) {
+          await randomDelay(80, 280);
+          continue;
         }
         if (!sa.lines[idx] || sa.lines[idx].speaker !== role) {
           throw new Error('回合状态与刚发送的一句不一致');

@@ -234,6 +234,27 @@ function getFirstRoundtableDialogueText() {
   return '';
 }
 
+function getEnvironmentExecutionPreviewList() {
+  const manualEnvIds = String(document.getElementById('manualEnvIds')?.value || '').trim();
+  if (manualEnvIds) {
+    const ids = manualEnvIds
+      .split('\n')
+      .map((id) => id.trim())
+      .filter((id) => id.length > 0);
+    return ids.map((envId) => {
+      const found = allEnvironments.find((env) => String(env.Id || env.id) === envId);
+      const envName = found ? (found.envName || found.name || `环境 ${envId}`) : `环境 ${envId}`;
+      return { envId: String(envId), envName: String(envName) };
+    });
+  }
+  return allEnvironments
+    .filter((env) => selectedEnvironmentIds.has(String(env.Id || env.id || '')))
+    .map((env) => ({
+      envId: String(env.Id || env.id || ''),
+      envName: String(env.envName || env.name || `环境 ${env.Id || env.id || ''}`)
+    }));
+}
+
 function updateScriptInput(path, key, value) {
   const prev = scriptInputs.get(path) || {};
   scriptInputs.set(path, { ...prev, [key]: value });
@@ -330,6 +351,18 @@ function renderScriptParamsForm() {
     }
 
     if (scriptIsRoundtable(script)) {
+      const roleOrderPreview = getRoleOrderFromDialogueText(String(input.roundtableDialogueText || ''));
+      const envPreview = getEnvironmentExecutionPreviewList();
+      const mappingRows = roleOrderPreview.map((role, i) => {
+        const env = envPreview[i];
+        if (!env) return `<li>${role} → （待选择环境）</li>`;
+        return `<li>${role} → ${env.envName} (${env.envId})</li>`;
+      }).join('');
+      const mappingHint = roleOrderPreview.length === 0
+        ? '先填写剧本后才会生成角色映射预览。'
+        : (envPreview.length === roleOrderPreview.length
+          ? '映射数量已匹配，可直接启动。'
+          : `当前映射数量不匹配：角色 ${roleOrderPreview.length} / 环境 ${envPreview.length}`);
       return `
         <div style="border:1px solid #d9edf7; border-radius:6px; background:#fff; padding:10px;">
           <div style="font-weight:600; margin-bottom:8px;">${idx + 1}. ${title}</div>
@@ -373,6 +406,11 @@ function renderScriptParamsForm() {
             placeholder="15"
             oninput="updateScriptInput('${escapedPath}', 'roundtableReadyTimeoutMin', this.value)"
           />
+          <div style="font-size:12px; color:#666; margin:10px 0 4px;">角色→环境映射预览（按当前执行顺序）</div>
+          <div style="font-size:12px; color:#555; background:#f7fbff; border:1px solid #dbeffd; border-radius:4px; padding:8px;">
+            <div style="margin-bottom:6px;">${mappingHint}</div>
+            <ul style="margin:0; padding-left:18px;">${mappingRows || '<li>暂无</li>'}</ul>
+          </div>
         </div>
       `;
     }
@@ -667,6 +705,13 @@ async function startExecution() {
       );
       return;
     }
+    if (config.maxConcurrent < environments.length) {
+      addLog(
+        `回合对话要求所有角色窗口同时就位：请把最大并发调到至少 ${environments.length}（当前 ${config.maxConcurrent}）。`,
+        'error'
+      );
+      return;
+    }
   }
 
   if (environments.length > config.maxConcurrent) {
@@ -721,6 +766,15 @@ async function startExecution() {
         const eid = String(e.Id || e.id || '');
         roundtableEnvRoleMap[eid] = letter;
       });
+      const mappingText = environments
+        .map((e, i) => {
+          const eid = String(e.Id || e.id || '');
+          const ename = String(e.envName || e.name || `环境 ${eid}`);
+          const role = roundtableRoleOrder[i] || '?';
+          return `${role}->${ename}(${eid})`;
+        })
+        .join(' | ');
+      addLog(`回合角色映射预览: ${mappingText}`, 'info');
     }
 
     let round = 1;
