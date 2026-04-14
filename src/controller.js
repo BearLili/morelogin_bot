@@ -17,6 +17,8 @@ class ScriptController extends EventEmitter {
       failed: 0
     };
     this.poolExhaustedStop = false;
+    this.roundtableSessionId = null;
+    this.roundtableEnvRoleMap = null;
   }
 
   /**
@@ -31,7 +33,7 @@ class ScriptController extends EventEmitter {
    * @param {Array} scripts - [{path,name,displayName}]
    * @param {Array} environments - 环境列表
    * @param {string} mode - perEnv | perScript
-   * @param {object} options - { globalMessagePoolSession }
+   * @param {object} options - { globalMessagePoolSession, roundtableSessionId, roundtableEnvRoleMap }
    */
   async executeScripts(scripts, environments = null, mode = 'perEnv', options = {}) {
     this.isStopped = false;
@@ -40,6 +42,8 @@ class ScriptController extends EventEmitter {
     this.mode = mode;
     this.stats = { running: 0, completed: 0, failed: 0 };
     this.globalMessagePoolSession = options.globalMessagePoolSession || null;
+    this.roundtableSessionId = options.roundtableSessionId || null;
+    this.roundtableEnvRoleMap = options.roundtableEnvRoleMap || null;
 
     if (!Array.isArray(scripts) || scripts.length === 0) {
       throw new Error('未选择脚本');
@@ -295,13 +299,28 @@ class ScriptController extends EventEmitter {
 
         try {
           this.emit('log', `${scriptLabel} 开始执行`, 'info');
+          const rid = String(envId);
+          const rtRole =
+            this.roundtableEnvRoleMap && this.roundtableEnvRoleMap[rid]
+              ? this.roundtableEnvRoleMap[rid]
+              : null;
+          const pathLower = String(scriptMeta.path || '').toLowerCase();
+          const nameLower = String(scriptMeta.name || '').toLowerCase();
+          const isRoundtableScript =
+            pathLower.includes('discord-roundtable') || nameLower.includes('roundtable');
+          const scriptInputMerged = {
+            ...(scriptMeta.scriptInput || {}),
+            ...(isRoundtableScript && rtRole && this.roundtableSessionId
+              ? { roundtableRole: rtRole, roundtableSessionId: this.roundtableSessionId }
+              : {})
+          };
           await executeFn({
             environmentId: envId,
             environment: environment,
             wsUrl: wsUrl,
             debugPort: debugPort,
             webdriver: webdriver,
-            scriptInput: scriptMeta.scriptInput || {},
+            scriptInput: scriptInputMerged,
             globalMessagePoolSession:
               this.globalMessagePoolSession ||
               scriptMeta.scriptInput?.globalMessagePoolSession ||

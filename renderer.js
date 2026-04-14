@@ -3,6 +3,7 @@ const path = require('path');
 const crypto = require('crypto');
 const ScriptController = require('./src/controller');
 const MoreLoginClient = require('./src/morelogin-client');
+const { getRoleOrderFromDialogueText } = require('./src/roundtable-parse');
 
 /** 一次「开始执行」内，所有窗口共享；每条话术全局仅用一次，用尽后中止整批任务 */
 function shuffleInPlace(arr) {
@@ -186,12 +187,18 @@ function toggleScript(path, name, displayName) {
   } else {
     selectedScripts.set(path, { path, name, displayName });
     if (!scriptInputs.has(path)) {
-      scriptInputs.set(path, {
+      const base = {
         waitSecondsText: '12',
         randomizeLinkOrder: false,
         groupConfigs: [],
-        groupConfigText: ''
-      });
+        groupConfigText: '',
+        roundtableChannelUrl: '',
+        roundtableDialogueText: '',
+        roundtableSameSpeakerDelaySecRange: '10-30',
+        roundtableBetweenSpeakersDelaySecRange: '30-60',
+        roundtableReadyTimeoutMin: '15'
+      };
+      scriptInputs.set(path, base);
     }
   }
   renderScriptParamsForm();
@@ -201,7 +208,30 @@ function toggleScript(path, name, displayName) {
 
 function scriptSupportsUrlInput(script) {
   const key = `${script.name || ''} ${script.displayName || ''}`.toLowerCase();
-  return key.includes('discord') || key.includes('dc') || key.includes('tg') || key.includes('telegram');
+  const pathKey = String(script.path || '').toLowerCase();
+  return (
+    key.includes('discord') ||
+    key.includes('dc') ||
+    key.includes('roundtable') ||
+    pathKey.includes('discord-roundtable') ||
+    key.includes('tg') ||
+    key.includes('telegram')
+  );
+}
+
+function scriptIsRoundtable(script) {
+  const n = String(script.name || '').toLowerCase();
+  const p = String(script.path || '').toLowerCase();
+  return n.includes('roundtable') || p.includes('discord-roundtable');
+}
+
+function getFirstRoundtableDialogueText() {
+  for (const s of selectedScripts.values()) {
+    if (!scriptIsRoundtable(s)) continue;
+    const input = scriptInputs.get(s.path) || {};
+    return String(input.roundtableDialogueText || '').trim();
+  }
+  return '';
 }
 
 function updateScriptInput(path, key, value) {
@@ -280,7 +310,12 @@ function renderScriptParamsForm() {
       waitSecondsText: '12',
       randomizeLinkOrder: false,
       groupConfigs: [],
-      groupConfigText: ''
+      groupConfigText: '',
+      roundtableChannelUrl: '',
+      roundtableDialogueText: '',
+      roundtableSameSpeakerDelaySecRange: '10-30',
+      roundtableBetweenSpeakersDelaySecRange: '30-60',
+      roundtableReadyTimeoutMin: '15'
     };
     const escapedPath = script.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
     const title = script.displayName || script.name;
@@ -290,6 +325,54 @@ function renderScriptParamsForm() {
         <div style="border:1px solid #e5e5e5; border-radius:6px; background:#fff; padding:10px;">
           <div style="font-weight:600; margin-bottom:6px;">${idx + 1}. ${title}</div>
           <div style="font-size:12px; color:#888;">这个脚本暂不需要频道分组配置，保持默认执行即可。</div>
+        </div>
+      `;
+    }
+
+    if (scriptIsRoundtable(script)) {
+      return `
+        <div style="border:1px solid #d9edf7; border-radius:6px; background:#fff; padding:10px;">
+          <div style="font-weight:600; margin-bottom:8px;">${idx + 1}. ${title}</div>
+          <div style="font-size:12px; color:#666; margin-bottom:8px;">
+            需要的环境数 = 剧本里出现的<strong>不同角色</strong>个数（行首单个字母 A–Z + 冒号）。勾选顺序 = 这些字母在剧本里<strong>从上到下首次出现</strong>的顺序。所有窗口进同一频道后<strong>全员就位</strong>才开聊；发完一句再按配置等待后才会推进到下一句（避免下一名抢跑）。
+          </div>
+          <div style="font-size:12px; color:#666; margin-bottom:4px;">频道链接（各窗口相同）</div>
+          <input
+            type="text"
+            value="${String(input.roundtableChannelUrl || '').replace(/"/g, '&quot;')}"
+            placeholder="https://discord.com/channels/服务器ID/频道ID"
+            oninput="updateScriptInput('${escapedPath}', 'roundtableChannelUrl', this.value)"
+          />
+          <div style="font-size:12px; color:#666; margin:10px 0 4px;">剧本（每行以单个字母 + ：开头，如 A：…、F：…，只发送冒号后的内容）</div>
+          <textarea
+            style="width:100%; min-height:140px; border:1px solid #ddd; border-radius:4px; padding:8px; font-family:monospace; font-size:12px;"
+            placeholder="A：第一句&#10;B：第二句"
+            oninput="updateScriptInput('${escapedPath}', 'roundtableDialogueText', this.value)"
+          >${input.roundtableDialogueText || ''}</textarea>
+          <div style="font-size:12px; color:#666; margin:12px 0 4px;">同角色连续两句之间随机等待（秒，如 10-30）</div>
+          <input
+            type="text"
+            style="width:100%; max-width:220px;"
+            value="${String(input.roundtableSameSpeakerDelaySecRange || '10-30').replace(/"/g, '&quot;')}"
+            placeholder="10-30"
+            oninput="updateScriptInput('${escapedPath}', 'roundtableSameSpeakerDelaySecRange', this.value)"
+          />
+          <div style="font-size:12px; color:#666; margin:10px 0 4px;">换角色（轮到别人下一句）前随机等待（秒，如 30-60）</div>
+          <input
+            type="text"
+            style="width:100%; max-width:220px;"
+            value="${String(input.roundtableBetweenSpeakersDelaySecRange || '30-60').replace(/"/g, '&quot;')}"
+            placeholder="30-60"
+            oninput="updateScriptInput('${escapedPath}', 'roundtableBetweenSpeakersDelaySecRange', this.value)"
+          />
+          <div style="font-size:12px; color:#666; margin:10px 0 4px;">全员就位超时（分钟，少一个窗口不开聊）</div>
+          <input
+            type="text"
+            style="width:100%; max-width:120px;"
+            value="${String(input.roundtableReadyTimeoutMin || '15').replace(/"/g, '&quot;')}"
+            placeholder="15"
+            oninput="updateScriptInput('${escapedPath}', 'roundtableReadyTimeoutMin', this.value)"
+          />
         </div>
       `;
     }
@@ -565,6 +648,27 @@ async function startExecution() {
     return;
   }
 
+  const hasRoundtable = Array.from(selectedScripts.values()).some(scriptIsRoundtable);
+  let roundtableRoleOrder = null;
+  if (hasRoundtable) {
+    const dialoguePreview = getFirstRoundtableDialogueText();
+    roundtableRoleOrder = getRoleOrderFromDialogueText(dialoguePreview);
+    if (roundtableRoleOrder.length === 0) {
+      addLog(
+        '已选择「Discord 多角色回合对话」：请先在剧本中写上至少一行「字母：正文」（如 A：你好），字母为单个 A–Z。',
+        'error'
+      );
+      return;
+    }
+    if (environments.length !== roundtableRoleOrder.length) {
+      addLog(
+        `回合对话：剧本中共有 ${roundtableRoleOrder.length} 个角色（按首次出现顺序：${roundtableRoleOrder.join(' → ')}），需要勾选同样数量的环境，当前为 ${environments.length} 个。`,
+        'error'
+      );
+      return;
+    }
+  }
+
   if (environments.length > config.maxConcurrent) {
     addLog(`注意: 选择了 ${environments.length} 个环境，但最大并发数为 ${config.maxConcurrent}，将按顺序执行`, 'warning');
   }
@@ -610,10 +714,28 @@ async function startExecution() {
       };
     });
 
+    const roundtableEnvRoleMap = {};
+    if (hasRoundtable && roundtableRoleOrder) {
+      roundtableRoleOrder.forEach((letter, i) => {
+        const e = environments[i];
+        const eid = String(e.Id || e.id || '');
+        roundtableEnvRoleMap[eid] = letter;
+      });
+    }
+
     let round = 1;
     do {
       if (!isRunning) break;
       addLog(`开始第 ${round} 轮执行`, 'info');
+
+      let roundtableSessionId = null;
+      if (hasRoundtable) {
+        roundtableSessionId = `rt_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        addLog(
+          `回合对话本轮会话 ID: ${roundtableSessionId}（环境顺序 = ${roundtableRoleOrder.join(' / ')}）`,
+          'info'
+        );
+      }
 
       controller = new ScriptController(client, config.maxConcurrent);
 
@@ -630,7 +752,9 @@ async function startExecution() {
       });
 
       await controller.executeScripts(selectedScriptsWithInput, environments, executionMode, {
-        globalMessagePoolSession
+        globalMessagePoolSession,
+        roundtableSessionId,
+        roundtableEnvRoleMap: hasRoundtable ? roundtableEnvRoleMap : null
       });
 
       if (controller.poolExhaustedStop) {
